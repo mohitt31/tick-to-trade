@@ -492,3 +492,40 @@ feed A, not from the rewind server, which may not be running.
 **Zero is a value.** The histogram used to clamp 0 to 1 and count it as clamped.
 A sender exactly on schedule at nanosecond resolution records 0, which is a
 measurement. Only negative values are clamped now.
+
+## 15. Groundwork for external timing and the jitter hunt
+
+**Kernel receive timestamps.** `--path recvmsg-ts` receives with `recvmsg` and
+`SO_TIMESTAMPING`, reads `CLOCK_REALTIME` straight after the call, and records the
+software stamp to user space as `stack_to_user`: time in the stack, the socket
+queue and the wakeup, all on one clock. `recvmsg-ts:IFACE` first asks the NIC to
+stamp every packet (`SIOCSHWTSTAMP` with `HWTSTAMP_FILTER_ALL`), refuses to run if
+the driver cannot or substitutes a narrower filter, and adds `nic_to_user`. That
+one compares the NIC's clock with the system clock, so it means something only
+with `phc2sys` disciplining the system clock, and `phc2sys`'s residual is its
+error bar. Datagrams missing a stamp are counted, never silently left out. In the
+container, every datagram carried a software stamp, and asking loopback for
+hardware stamps failed with "Operation not supported", which is what it should
+do. These are internal views. The external measurement, hardware stamps on the
+wire on one clock, is still to be built, and its outgoing probe packet waits on
+a decision about the scope line.
+
+**The outlier log.** `--outliers-over-ns N` logs every datagram whose schedule to
+handled time exceeds N: receive time on the monotonic clock, first sequence
+number, and the timings. The log is reserved up front and never grows during a
+run, so logging an outlier cannot itself cause one, and overflow is counted.
+Rejected: a lock-free ring drained by another core. That moves the same bytes
+through more machinery, and the receiver's own core is only a correlation input
+here, not something that needs isolating from a writer.
+
+**Joining outliers with the kernel.** `tools/box/jitter_record.sh` runs the
+receiver while recording, on its core, IRQ and softirq entry, user page faults,
+migrations, context switches, hrtimer expiry, tick stop and workqueue work with
+`perf -k CLOCK_MONOTONIC`, the same clock as the outlier log. It also samples
+compaction and THP counters and turbostat's SMI count, since SMIs never appear in
+a kernel trace. `tools/box/jitter_correlate.py` reports, per event type, the share
+of outliers with such an event on the core just before them, and the share with
+nothing at all, which is reported rather than dropped. Its self-test caught its
+own first bug: the event-name pattern kept a trailing colon, so no event would
+ever have matched its type. Sharing a window is not causation. The table picks
+what to chase, and a fix with a before-and-after run is the proof.

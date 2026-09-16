@@ -43,7 +43,13 @@ struct BenchConfig {
     bool               trailer = true;
     u64                idle_timeout_ns = 5'000'000'000;
     net::Endpoint      rewind_server{};  // port 0: no retransmission requests
-    u64 warmup_ns = 0;  // after the first datagram, latency is not recorded for this long
+    u64         warmup_ns = 0;  // after the first datagram, latency is not recorded for this long
+    // Datagrams whose schedule-to-handled time exceeds this are logged with
+    // their receive time and sequence number, for correlating with kernel
+    // events. 0 disables the log. The log is allocated up front and never grows
+    // during a run; outliers past its capacity are counted, not stored.
+    u64         outlier_threshold_ns = 0;
+    std::size_t outlier_capacity = 1'000'000;
 };
 
 struct BenchResult {
@@ -53,6 +59,16 @@ struct BenchResult {
     audit::FlowReport    sequence{};     // what arrived, by sequence number
     u64                  missing = 0;    // messages that never arrived
     u64                  unapplied = 0;  // arrived, but held behind a gap
+
+    struct Outlier {
+        u64       recv_ns;           // monotonic, when the receive call returned
+        u64       sequence;          // first message in the packet
+        itch::i64 intended_to_recv;  // schedule to receive
+        itch::i64 sent_to_recv;      // send call to receive
+        itch::i64 handled;           // schedule to the handler returning
+    };
+    std::vector<Outlier> outliers;
+    u64                  outliers_dropped = 0;
 };
 
 template <class Path>
@@ -82,6 +98,9 @@ BenchResult run_bench(Path& path, const BenchConfig& cfg, const std::atomic<bool
     BenchResult res;
     res.rx.latency.emplace();
     auto& lat = *res.rx.latency;
+    if (cfg.outlier_threshold_ns != 0) {
+        res.outliers.reserve(cfg.outlier_capacity);
+    }
 
     feed::BookSink book(cfg.symbol, cfg.book);
     u64            applied = 0;
@@ -116,6 +135,8 @@ BenchResult run_bench(Path& path, const BenchConfig& cfg, const std::atomic<bool
                 record_from = t_recv + cfg.warmup_ns;
             }
             const bool recording = t_recv >= record_from;
+            u64        intended = 0;
+            u64        sent = 0;
             if (cfg.trailer) {
                 // The trailer is stripped from every datagram, warmup or not;
                 // only whether its times are recorded depends on the warmup.
@@ -125,13 +146,29 @@ BenchResult run_bench(Path& path, const BenchConfig& cfg, const std::atomic<bool
                     lat.intended_to_recv.record(diff(t_recv, t->intended_ns));
                     lat.sent_to_recv.record(diff(t_recv, t->sent_ns));
                     lat.sender_lag.record(diff(t->sent_ns, t->intended_ns));
+                    intended = t->intended_ns;
+                    sent = t->sent_ns;
                 } else {
                     ++lat.without_trailer;
                 }
             }
             handler.on_packet(feed::Source::A, dgram, t_recv);
             if (recording) {
-                lat.handler.record(diff(now_ns(), t_recv));
+                const u64 done = now_ns();
+                lat.handler.record(diff(done, t_recv));
+                if (cfg.outlier_threshold_ns != 0 && intended != 0 &&
+                    done - intended > cfg.outlier_threshold_ns) {
+                    if (res.outliers.size() < res.outliers.capacity()) {
+                        const u64 first =
+                            dgram.size() >= mold::kHeaderSize
+                                ? itch::load_be<u64>(dgram.data() + mold::kSessionSize)
+                                : 0;
+                        res.outliers.push_back({t_recv, first, diff(t_recv, intended),
+                                                diff(t_recv, sent), diff(done, intended)});
+                    } else {
+                        ++res.outliers_dropped;
+                    }
+                }
             }
             seq.observe(t_recv, flow, dgram);  // after the timed part
         });

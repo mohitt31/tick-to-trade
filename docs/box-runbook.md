@@ -85,3 +85,27 @@ Boot knobs (`isolcpus`, `nohz_full`, `rcu_nocbs`, `cstates_boot`) need the
 parameter on the kernel command line and a reboot. `ablation.sh` refuses to run
 them unless `/proc/cmdline` really has it. Remove the parameter again before the
 next knob, because each knob is measured alone.
+
+## 6. Where the time goes, from the kernel's side
+
+```sh
+sudo taskset -c 7 build/linux-release/apps/ttt_rxbench --path recvmsg-ts:enp2s0 \
+    --feed 10.77.0.1:30001 --warmup-ms 10000 --latency-out measurements/timestamps/run1
+```
+
+`stack_to_user` needs nothing else. `nic_to_user` needs `phc2sys -s enp2s0 -c
+CLOCK_REALTIME -O 0 -m` running, and its offset log kept next to the result as
+the error bar.
+
+## 7. Jitter hunt
+
+```sh
+sudo tools/box/jitter_record.sh measurements/jitter/before -- --path recvmmsg:32 \
+    --feed 10.77.0.1:30001 --warmup-ms 10000 --outliers-over-ns 200000 \
+    --latency-out measurements/jitter/before/rx
+tools/box/jitter_correlate.py measurements/jitter/before/rx-outliers.csv \
+    measurements/jitter/before/perf.txt --cpu 7
+```
+
+Pick the cause at the top of the table, fix it, and repeat the same run into
+`measurements/jitter/after`. The before and after distributions are the result.

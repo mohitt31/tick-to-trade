@@ -5,6 +5,8 @@
 //
 //   --path recvfrom | recvmmsg:BATCH | epoll-lt | epoll-et | uring | uring-sqpoll | uring-defer
 //          | xdp:IFACE:QUEUE:native|generic:copy|zerocopy[:busy]
+//          | recvmsg-ts[:IFACE]   recvmsg with kernel receive timestamps; with IFACE,
+//          hardware stamps too, after asking IFACE to stamp every packet
 //          For xdp, --feed is the flow the XDP program redirects, and no UDP
 //          socket is opened, so a packet the program misses is not quietly
 //          delivered by the kernel instead.
@@ -22,6 +24,8 @@
 //   --manifest-iface NAME      describe this interface in the manifest
 //   --idle-timeout-ms N        (default 5000)
 //   --warmup-ms N              do not record latency for the first N ms of traffic
+//   --outliers-over-ns N       log datagrams slower than N ns (schedule to handled) to
+//                              PREFIX-outliers.csv, for tools/box/jitter_correlate.py
 //
 // The sender must be ttt_feedd --trailer on the same host, so both read one clock.
 // Every knob set here is also read back from the kernel into the manifest.
@@ -42,6 +46,7 @@
 #include "ttt/measure/manifest.hpp"
 #include "ttt/rx/bench_receiver.hpp"
 #include "ttt/rx/socket_paths.hpp"
+#include "ttt/rx/timestamp_path.hpp"
 #include "ttt/rx/uring_path.hpp"
 #include "ttt/xdp/xsk.hpp"
 
@@ -164,6 +169,27 @@ int report(Path& path, const rx::BenchConfig& bc, const std::string& path_name,
         h->write_hgrm(f);
         std::fclose(f);
     }
+    if (bc.outlier_threshold_ns != 0) {
+        std::printf("outliers over %" PRIu64 " ns: %zu logged, %" PRIu64
+                    " past the log's capacity\n",
+                    bc.outlier_threshold_ns, r.outliers.size(), r.outliers_dropped);
+        if (!latency_out.empty()) {
+            const std::string path_out = latency_out + "-outliers.csv";
+            std::FILE*        f = std::fopen(path_out.c_str(), "w");
+            if (f == nullptr) {
+                std::fprintf(stderr, "ttt_rxbench: cannot write %s\n", path_out.c_str());
+                return 1;
+            }
+            measure::write_manifest(f, manifest);
+            std::fprintf(
+                f, "recv_monotonic_ns,sequence,intended_to_recv_ns,sent_to_recv_ns,handled_ns\n");
+            for (const auto& o : r.outliers) {
+                std::fprintf(f, "%" PRIu64 ",%" PRIu64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "\n",
+                             o.recv_ns, o.sequence, o.intended_to_recv, o.sent_to_recv, o.handled);
+            }
+            std::fclose(f);
+        }
+    }
     return r.rx.ended && !r.rx.stale && r.missing == 0 ? 0 : 1;
 }
 
@@ -224,6 +250,8 @@ int main(int argc, char** argv) try {
             bc.idle_timeout_ns = num(val()) * 1'000'000;
         else if (a == "--warmup-ms")
             bc.warmup_ns = num(val()) * 1'000'000;
+        else if (a == "--outliers-over-ns")
+            bc.outlier_threshold_ns = num(val());
         else
             usage("unknown option " + a);
     }
@@ -310,6 +338,29 @@ int main(int argc, char** argv) try {
     // The kernel reports twice what it grants, for its own bookkeeping.
     std::printf("rcvbuf requested %d  granted %d\n", rcvbuf, net::effective_rcvbuf(fd.get()) / 2);
 
+    if (path_name == "recvmsg-ts" || path_name.rfind("recvmsg-ts:", 0) == 0) {
+        // recvmsg-ts            software receive timestamps
+        // recvmsg-ts:IFACE      also hardware, after asking IFACE to stamp everything
+        const bool hardware = path_name.size() > 10;
+        if (hardware) {
+            const std::string ifc = path_name.substr(11);
+            if (const int err = rx::enable_hw_rx_timestamps(ifc); err != 0) {
+                std::fprintf(stderr, "ttt_rxbench: %s cannot hardware-timestamp every packet: %s\n",
+                             ifc.c_str(), std::strerror(err));
+                return 1;
+            }
+        }
+        rx::TimestampPath p(fd.get(), timeout, hardware);
+        const int         rc = report(p, bc, path_name, latency_out, manifest_iface);
+        std::printf("stack_to_user     %s\n", p.stack_to_user().summary().c_str());
+        if (hardware) {
+            std::printf("nic_to_user       %s\n", p.nic_to_user().summary().c_str());
+        }
+        std::printf("datagrams without a software stamp %" PRIu64
+                    ", without a hardware stamp %" PRIu64 "\n",
+                    p.without_software(), p.without_hardware());
+        return rc;
+    }
     if (path_name == "recvfrom") {
         rx::RecvfromPath p(fd.get(), timeout);
         return report(p, bc, path_name, latency_out, manifest_iface);

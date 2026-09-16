@@ -17,6 +17,7 @@
 #include "ttt/live/feed_server.hpp"
 #include "ttt/rx/bench_receiver.hpp"
 #include "ttt/rx/socket_paths.hpp"
+#include "ttt/rx/timestamp_path.hpp"
 #include "ttt/rx/uring_path.hpp"
 #include "ttt/sim/order_gen.hpp"
 
@@ -177,6 +178,40 @@ TEST(RxPaths, EpollEdgeDrainsToEagain) {
     EXPECT_GE(run.result.path.syscalls, 2 * run.result.path.wakeups + run.result.path.datagrams);
 }
 
+// Software receive timestamps come with every datagram, and the time from the
+// kernel's stamp to recvmsg returning is positive and sane. Hardware stamps are
+// asked for too; loopback cannot give them, and the path must say so rather
+// than record nothing quietly.
+TEST(RxPaths, KernelReceiveTimestamps) {
+    // The whole pipeline over the timestamping path first.
+    const PathRun run =
+        run_with([](int fd) { return std::make_unique<TimestampPath>(fd, 10'000'000, true); });
+    expect_complete(run);
+
+    // run_with does not keep the path, so its timestamp histograms are checked
+    // on a path this test owns.
+    net::UdpOptions o;
+    o.bind = net::Endpoint{net::kLoopback, 0};
+    net::Fd                         rx = net::udp_socket(o);
+    net::Fd                         tx = net::udp_socket(o);
+    TimestampPath                   p(rx.get(), 100'000'000, true);
+    const std::array<std::byte, 64> payload{};
+    for (int i = 0; i < 100; ++i) {
+        ASSERT_EQ(net::send_to(tx.get(), net::local_endpoint(rx.get()), payload), net::Io::Ok);
+    }
+    std::size_t got = 0;
+    while (got < 100 && p.receive([](std::span<const std::byte>, u64) {}) == 1) {
+        ++got;
+    }
+    EXPECT_EQ(got, 100u);
+    EXPECT_EQ(p.without_software(), 0u);
+    EXPECT_EQ(p.stack_to_user().count(), 100u);
+    EXPECT_EQ(p.stack_to_user().clamped_low(), 0u);  // the stamp is never after the return
+    EXPECT_LT(p.stack_to_user().max(), 1'000'000'000);
+    EXPECT_EQ(p.without_hardware(), 100u);  // loopback has no NIC to stamp with
+    EXPECT_EQ(p.nic_to_user().count(), 0u);
+}
+
 TEST(RxPaths, IoUringAllModes) {
     for (UringMode mode : {UringMode::Plain, UringMode::Sqpoll, UringMode::Defer}) {
         SCOPED_TRACE(testing::Message() << "mode " << static_cast<int>(mode));
@@ -184,6 +219,61 @@ TEST(RxPaths, IoUringAllModes) {
             run_with([mode](int fd) { return std::make_unique<UringPath>(fd, 10'000'000, mode); },
                      100'000, 300);
         expect_complete(run);
+    }
+}
+
+}  // namespace
+}  // namespace ttt::rx
+
+namespace ttt::rx {
+namespace {
+
+// With a threshold of 1 ns every recorded datagram is an outlier, so the log
+// has to hold exactly the recorded ones, in receive order, each with its first
+// sequence number, and never more than its capacity.
+TEST(RxPaths, OutlierLog) {
+    net::UdpOptions o;
+    o.bind = net::Endpoint{net::kLoopback, 0};
+    o.rcvbuf = 8 << 20;
+    net::Fd feed = net::udp_socket(o);
+    net::Fd sink = net::udp_socket(o);
+
+    live::FeedServerConfig fc;
+    fc.session = mold::Session("OUTLIERS");
+    fc.feed[0] = net::local_endpoint(feed.get());
+    fc.feed[1] = net::local_endpoint(sink.get());
+    fc.rewind = net::Endpoint{net::kLoopback, 0};
+    fc.snapshot = net::Endpoint{net::kLoopback, 0};
+    for (auto& s : fc.stream) {
+        s.packets_per_second = 20'000;
+        s.budget = 600;
+    }
+    fc.trailer = true;
+    fc.start_delay_ns = 50'000'000;
+    fc.eos_interval_ns = 10'000'000;
+    fc.eos_repeats = 5;
+
+    RecvfromPath      path(feed.get(), 10'000'000);
+    live::FeedServer  tx(fc, source(), source());
+    std::atomic<bool> stop{false};
+    std::thread       t([&] { (void)tx.run(stop); });
+    BenchConfig       bc;
+    bc.line.session = fc.session;
+    bc.outlier_threshold_ns = 1;
+    bc.outlier_capacity = 500;
+    const BenchResult r = run_bench(path, bc, stop);
+    t.join();
+
+    ASSERT_EQ(r.rx.stopped_because, "end of session, book complete");
+    const u64 recorded = r.rx.latency->intended_to_recv.count();
+    ASSERT_GT(recorded, 500u);
+    EXPECT_EQ(r.outliers.size(), 500u);
+    EXPECT_EQ(r.outliers.size() + r.outliers_dropped, recorded);
+    EXPECT_EQ(r.outliers.front().sequence, 1u);
+    for (std::size_t i = 1; i < r.outliers.size(); ++i) {
+        EXPECT_GE(r.outliers[i].recv_ns, r.outliers[i - 1].recv_ns);
+        EXPECT_GT(r.outliers[i].sequence, r.outliers[i - 1].sequence);
+        EXPECT_GE(r.outliers[i].handled, r.outliers[i].intended_to_recv);
     }
 }
 
