@@ -392,3 +392,64 @@ Knobs that are per-process rather than per-boot are flags on `ttt_rxbench`, so
 the ablation can apply them one at a time: `--cpu`, `--fifo`, `--mlock`,
 `--busy-poll-us`, `--prefer-busy-poll`, `--rcvbuf`. The manifest records what
 the kernel reports for each.
+
+## 13. AF_XDP, written against the kernel directly
+
+`src/bpf/xdp_redirect.bpf.c` redirects IPv4 UDP to the feed's destination to the
+AF_XDP socket on the queue it arrived on, and passes everything else, ARP and
+IGMP included. A feed packet whose queue has no socket is passed to the kernel,
+not dropped, and counted. That case (the NIC's RSS spread the flow and the socket
+is bound elsewhere) is the textbook way AF_XDP loses traffic with no error
+anywhere, so it gets its own counter. The program is embedded through a libbpf
+skeleton, so each binary carries it.
+
+`src/xdp/xsk.cpp` sets up the socket with raw system calls rather than libxdp's
+helpers: register the UMEM, size the fill, completion and RX rings, map them
+from `XDP_MMAP_OFFSETS`, bind. The goal is for every step the zero-copy claim
+depends on to be in one readable file.
+
+**Modes are forced, then read back.** The program attaches with
+`XDP_FLAGS_DRV_MODE` or `XDP_FLAGS_SKB_MODE`, never with neither, and the
+attached mode is then read back with `bpf_xdp_query`. The socket binds with
+`XDP_ZEROCOPY` or `XDP_COPY`, never with neither, since with neither the kernel
+tries zero-copy and falls back to copy without a word. The mode is then read back
+with `getsockopt(XDP_OPTIONS)`, and the constructor throws if the two disagree.
+
+**Every frame is always somewhere known.** A frame is either on this process's
+free list or with the kernel (fill ring, NIC, RX ring). It comes back only
+through the RX ring and returns to the fill ring once its packet is handled.
+`free + with_kernel == frames` is asserted on every batch.
+
+**UMEM placement is read from the kernel.** `get_mempolicy` with
+`MPOL_F_NODE | MPOL_F_ADDR` gives the node the first page is actually on. Docker's
+kernel is built without `CONFIG_NUMA` and cannot say, so the answer there is -1.
+The test accepts -1 only where `/sys/devices/system/node` does not exist.
+
+**Checked on a veth pair in the container**, with the sender in its own network
+namespace. veth supports native XDP and not zero-copy, which is exactly what
+the gate logic needs to be tested against:
+
+- A forced zero-copy bind fails with `EOPNOTSUPP` and the error names the mode.
+  It does not become a copy-mode socket.
+- A forced native attach is reported as native by the kernel.
+- In copy mode, native and generic, every message arrives, the book digest
+  matches the oracle, the program's redirect count covers every datagram the
+  socket delivered, and the socket reports no drops.
+- With no socket bound, the feed is counted as "no socket on queue" and nothing
+  else anywhere reports a problem. That is the trap, reproduced on purpose.
+
+`ttt_xdp_probe` is the Gate 0 tool: it runs those checks against a real
+interface and prints PASS or FAIL per step. On the veth pair, zero-copy gives
+`bind FAIL ... Operation not supported` and `GATE FAIL`, and copy with traffic
+passes every check, including a non-zero NAPI id on the socket, which busy
+polling needs. `ttt_rxbench --path xdp:IF:Q:native|generic:copy|zerocopy[:busy]`
+measures the path. On XDP it opens no UDP socket for the feed, so a packet the
+program misses cannot be quietly delivered by the kernel instead. A busy-polled
+copy-mode run on veth delivered all 50,004 messages while the kernel's UDP
+input counter did not move at all. That is the direct evidence that the feed
+bypassed the kernel's UDP stack.
+
+**The trailer now has a size limit.** A 1472-byte packet plus the 32-byte trailer
+no longer fits a 1500-byte MTU, and the kernel fragments it. An XDP program sees
+the UDP header only in the first fragment. The feed server refuses a budget
+above 1440 bytes when the trailer is on.

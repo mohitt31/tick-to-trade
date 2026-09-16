@@ -37,6 +37,11 @@ using itch::u32;
 using itch::u64;
 
 inline constexpr std::size_t kTrailerSize = 32;
+
+// The largest MoldUDP64 packet that still fits a 1500-byte MTU with a trailer.
+// Past it the kernel fragments the datagram, and an XDP program sees the UDP
+// header only in the first fragment.
+inline constexpr std::size_t kMaxPacketWithTrailer = 1472 - kTrailerSize;
 inline constexpr u32         kTrailerMagic = 0x54545431;  // "TTT1"
 
 struct Trailer {

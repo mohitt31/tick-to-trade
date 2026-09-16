@@ -4,6 +4,10 @@
 //   ttt_rxbench --path PATH [options]
 //
 //   --path recvfrom | recvmmsg:BATCH | epoll-lt | epoll-et | uring | uring-sqpoll | uring-defer
+//          | xdp:IFACE:QUEUE:native|generic:copy|zerocopy[:busy]
+//          For xdp, --feed is the flow the XDP program redirects, and no UDP
+//          socket is opened, so a packet the program misses is not quietly
+//          delivered by the kernel instead.
 //   --feed A.B.C.D:PORT        bind; a multicast group is joined (default 239.1.1.1:30001)
 //   --iface A.B.C.D            interface address for the join (default 127.0.0.1)
 //   --session NAME  --symbol SYM
@@ -38,6 +42,7 @@
 #include "ttt/rx/bench_receiver.hpp"
 #include "ttt/rx/socket_paths.hpp"
 #include "ttt/rx/uring_path.hpp"
+#include "ttt/xdp/xsk.hpp"
 
 using namespace ttt;
 using itch::u64;
@@ -243,6 +248,54 @@ int main(int argc, char** argv) try {
         return 1;
     }
 
+    std::signal(SIGINT, [](int) { g_stop = true; });
+    const u64 timeout = 10'000'000;
+
+    if (path_name.rfind("xdp:", 0) == 0) {
+        std::vector<std::string> parts;
+        std::size_t              at = 0;
+        for (;;) {
+            const std::size_t p = path_name.find(':', at);
+            parts.push_back(
+                path_name.substr(at, p == std::string::npos ? std::string::npos : p - at));
+            if (p == std::string::npos) break;
+            at = p + 1;
+        }
+        if (parts.size() < 5 || parts.size() > 6 ||
+            (parts[3] != "native" && parts[3] != "generic") ||
+            (parts[4] != "copy" && parts[4] != "zerocopy") ||
+            (parts.size() == 6 && parts[5] != "busy")) {
+            usage("xdp path is xdp:IFACE:QUEUE:native|generic:copy|zerocopy[:busy]");
+        }
+        xdp::Program prog(parts[1],
+                          parts[3] == "native" ? xdp::AttachMode::Native : xdp::AttachMode::Generic,
+                          feed);
+        xdp::SocketConfig sc;
+        sc.queue = static_cast<xdp::u32>(num(parts[2]));
+        sc.bind = parts[4] == "zerocopy" ? xdp::BindMode::ZeroCopy : xdp::BindMode::Copy;
+        xdp::Socket sock(prog, sc);
+        if (busy_poll_us > 0) setsock(sock.fd(), SO_BUSY_POLL, busy_poll_us, "SO_BUSY_POLL");
+        if (prefer_busy_poll) setsock(sock.fd(), SO_PREFER_BUSY_POLL, 1, "SO_PREFER_BUSY_POLL");
+        std::printf("xdp attached %s (requested %s), socket %s on queue %u, UMEM on NUMA node %d\n",
+                    prog.attached_mode().c_str(), parts[3].c_str(),
+                    sock.zerocopy() ? "zerocopy" : "copy", sc.queue, sock.umem_numa_node());
+        xdp::XdpPath path(sock, feed, timeout, parts.size() == 6);
+        const int    rc = report(path, bc, path_name, latency_out, manifest_iface);
+        const auto   c = prog.counters();
+        const auto   st = sock.statistics();
+        std::printf("xdp program: redirected %" PRIu64 "  no socket on queue %" PRIu64
+                    "  passed %" PRIu64 "\n",
+                    c.redirected, c.no_socket, c.passed);
+        std::printf(
+            "xsk statistics: rx_dropped %llu  rx_ring_full %llu  fill_ring_empty %llu  invalid "
+            "%llu\n",
+            static_cast<unsigned long long>(st.rx_dropped),
+            static_cast<unsigned long long>(st.rx_ring_full),
+            static_cast<unsigned long long>(st.rx_fill_ring_empty_descs),
+            static_cast<unsigned long long>(st.rx_invalid_descs));
+        return rc != 0 || c.no_socket != 0 || st.rx_dropped != 0 ? 1 : rc;
+    }
+
     net::UdpOptions o;
     o.bind = feed;
     o.iface = iface;
@@ -253,9 +306,6 @@ int main(int argc, char** argv) try {
     if (prefer_busy_poll) setsock(fd.get(), SO_PREFER_BUSY_POLL, 1, "SO_PREFER_BUSY_POLL");
     // The kernel reports twice what it grants, for its own bookkeeping.
     std::printf("rcvbuf requested %d  granted %d\n", rcvbuf, net::effective_rcvbuf(fd.get()) / 2);
-
-    std::signal(SIGINT, [](int) { g_stop = true; });
-    const u64 timeout = 10'000'000;
 
     if (path_name == "recvfrom") {
         rx::RecvfromPath p(fd.get(), timeout);

@@ -17,6 +17,7 @@
 #include "ttt/feed/book_sink.hpp"
 #include "ttt/live/feed_server.hpp"
 #include "ttt/live/receiver.hpp"
+#include "ttt/measure/trailer.hpp"
 #include "ttt/sim/order_gen.hpp"
 
 namespace ttt::live {
@@ -171,6 +172,7 @@ TEST(Loopback, TrailerLatencyIsRecordedForEveryFeedDatagram) {
     rc.record_latency = true;
     FeedServerConfig fc = server_config(5'000);
     fc.trailer = true;
+    fc.stream[0].budget = measure::kMaxPacketWithTrailer;
 
     const auto out = run_pair(s, rc, fc);
     ASSERT_EQ(out.rx.stopped_because, "end of session, book complete");

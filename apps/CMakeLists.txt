@@ -15,5 +15,8 @@ target_link_libraries(ttt_recv PRIVATE ttt ttt_warnings)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(ttt_rxbench rxbench.cpp)
-  target_link_libraries(ttt_rxbench PRIVATE ttt_rx ttt_warnings)
+  target_link_libraries(ttt_rxbench PRIVATE ttt_xdp ttt_warnings)
+
+  add_executable(ttt_xdp_probe xdp_probe.cpp)
+  target_link_libraries(ttt_xdp_probe PRIVATE ttt_xdp ttt_warnings)
 endif()

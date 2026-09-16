@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <queue>
+#include <stdexcept>
+#include <string>
 
 #include "itch/book/book_types.hpp"
 #include "itch/core/endian.hpp"
@@ -69,6 +71,15 @@ struct FeedServer::Impl {
           rewind(c.session, c.rewind_capacity, c.stream[0].budget),
           snap(c.session, c.symbol, kCap),
           rng(c.faults.seed) {
+        if (c.trailer) {
+            for (const auto& sc : c.stream) {
+                if (sc.budget > measure::kMaxPacketWithTrailer) {
+                    throw std::invalid_argument("with the trailer, a packet budget above " +
+                                                std::to_string(measure::kMaxPacketWithTrailer) +
+                                                " bytes no longer fits a 1500-byte MTU");
+                }
+            }
+        }
         for (int f = 0; f < 2; ++f) {
             replay::StreamConfig sc = c.stream[f];
             sc.session = c.session;

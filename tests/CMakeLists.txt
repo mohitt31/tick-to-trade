@@ -49,6 +49,7 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   ttt_test(linux_rx_paths SERIAL SOURCES linux/rx_paths_test.cpp LIBS ttt_rx)
+  ttt_test(linux_xdp SERIAL SOURCES linux/xdp_test.cpp LIBS ttt_xdp)
 endif()
 
 # Real sockets over loopback. Serial: they bind ports and pace in real time.
