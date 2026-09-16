@@ -12,3 +12,8 @@ target_link_libraries(ttt_feedd PRIVATE ttt ZLIB::ZLIB ttt_warnings)
 
 add_executable(ttt_recv recv.cpp)
 target_link_libraries(ttt_recv PRIVATE ttt ttt_warnings)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(ttt_rxbench rxbench.cpp)
+  target_link_libraries(ttt_rxbench PRIVATE ttt_rx ttt_warnings)
+endif()

@@ -331,3 +331,64 @@ source, because Project 1 found Low Power Mode halves throughput. It always
 includes the commit, regenerated on every build with a `-dirty` suffix, so a
 number can always be traced to its code. Everything is read from the kernel at
 run time, never taken from what a setup script meant to set.
+
+## 12. The Linux receive paths
+
+`ttt_rxbench` measures one path on one feed: `recvfrom`, `recvmmsg:N`,
+`epoll-lt`, `epoll-et`, `uring`, `uring-sqpoll`, `uring-defer`. Every path has the
+same shape, `receive(on_datagram)`, and one loop (`run_bench`) drives them all,
+so between two runs the path is the only thing that changes. Per datagram the
+loop stamps the time the call returned, strips the trailer, records latency,
+runs the LineHandler and the book, and records how long that took. Datagrams
+returned by one call share one timestamp, because that is when user space has
+them.
+
+What each path is, so the comparison has something to explain:
+
+- `recvfrom`: blocks in the call, one system call and one copy per datagram.
+- `recvmmsg` with `MSG_WAITFORONE`: blocks for the first datagram, takes what
+  else is queued in the same call. Same copy, shared call. Its timeout argument is
+  only checked between datagrams, so `SO_RCVTIMEO` bounds the wait.
+- `epoll`, level-triggered: one read per readiness, back to `epoll_pwait2`
+  (nanosecond timeout). Edge-triggered: drain to `EAGAIN`, which costs one empty
+  read every wakeup. With a single socket, epoll can only add calls. The tests
+  assert the extra calls are there, not that epoll is slower.
+- `io_uring`: one multishot `recvmsg` with a 1024-buffer provided ring, so the
+  steady state has no per-packet submission. Plain, SQPOLL, and
+  `DEFER_TASKRUN | SINGLE_ISSUER`. It is still a socket receive: the network
+  stack and the copy remain. zcrx is out, because it needs NIC header split.
+
+Every path counts its own receive calls, wakeups and empty returns. Those explain
+the numbers. perf on the box is what confirms them.
+
+These build and pass functional tests in an arm64 Linux container (Linux
+6.12, liburing 2.9) on the Mac: all messages arrive, the book digest matches the
+oracle, recvmmsg never exceeds its batch, and edge-triggered epoll makes its
+extra call. The container is never a measurement.
+
+**Loss is counted two independent ways, and they have to agree.** The first
+version reported "lost" as the frontier minus the next expected message. A
+single early drop, never filled in a measurement run, made everything behind it
+look lost. Loss is now counted by the same sequence audit that checks pcaps,
+outside the timed part of each datagram. Separately, `ttt_rxbench` reads the
+kernel's UDP counters from `/proc/net/snmp` before and after. The first run that
+did both, in the container at 100k packets/s:
+
+```
+rcvbuf requested 212992  granted 212992      path uring
+missing 475  (by sequence)                   kernel rcvbuf errors 56
+```
+
+At about 8.5 messages a packet, 56 dropped datagrams is 475 messages. The two
+counts agree, so the loss was the socket buffer and nothing hidden. The cause
+was Linux capping `SO_RCVBUF` at `net.core.rmem_max` (212992 there) without
+saying so. Asked for 8 MiB, it granted 208 KB. `udp_socket` now tries
+`SO_RCVBUFFORCE` first, and `ttt_rxbench` prints what was requested and what
+was granted. With 8 MiB granted, every path is complete with zero loss on both
+counts. This is the same rule Gate 0 applies to AF_XDP: sequence numbers are
+the truth, and a counter is only a second witness.
+
+Knobs that are per-process rather than per-boot are flags on `ttt_rxbench`, so
+the ablation can apply them one at a time: `--cpu`, `--fifo`, `--mlock`,
+`--busy-poll-us`, `--prefer-busy-poll`, `--rcvbuf`. The manifest records what
+the kernel reports for each.

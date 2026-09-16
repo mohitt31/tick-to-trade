@@ -47,5 +47,9 @@ if(TTT_MUTANTS)
   set_tests_properties(mutant.control PROPERTIES TIMEOUT 600)
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  ttt_test(linux_rx_paths SERIAL SOURCES linux/rx_paths_test.cpp LIBS ttt_rx)
+endif()
+
 # Real sockets over loopback. Serial: they bind ports and pace in real time.
 ttt_test(e2e_loopback SERIAL SOURCES e2e/loopback_test.cpp)

@@ -115,7 +115,7 @@ std::string affinity() {
         return kNa;
     }
     std::string out;
-    for (int c = 0; c < CPU_SETSIZE; ++c) {
+    for (std::size_t c = 0; c < static_cast<std::size_t>(CPU_SETSIZE); ++c) {
         if (CPU_ISSET(c, &set)) {
             out += (out.empty() ? "" : ",") + std::to_string(c);
         }

@@ -48,7 +48,7 @@ struct UdpOptions {
     Endpoint bind{};             // local address and port; port 0 picks one
     Ipv4     iface = kLoopback;  // interface for multicast joins and sends
     bool     join = false;       // join bind.ip as a multicast group
-    int      rcvbuf = 0;         // SO_RCVBUF if non-zero
+    int      rcvbuf = 0;         // receive buffer if non-zero; see effective_rcvbuf()
     int      sndbuf = 0;
     u8       ttl = 1;
     bool     loop = true;  // deliver our own multicast sends locally
@@ -56,6 +56,11 @@ struct UdpOptions {
 
 // A non-blocking UDP socket, bound, joined to its group if asked.
 [[nodiscard]] Fd udp_socket(const UdpOptions& opt);
+
+// The receive buffer the kernel actually granted. Linux silently caps SO_RCVBUF
+// at net.core.rmem_max, so asking is not the same as getting; udp_socket tries
+// SO_RCVBUFFORCE first, which ignores the cap when the process may.
+[[nodiscard]] int effective_rcvbuf(int fd);
 
 // The address a socket ended up bound to.
 [[nodiscard]] Endpoint local_endpoint(int fd);

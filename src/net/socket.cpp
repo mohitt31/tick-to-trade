@@ -98,7 +98,12 @@ Fd udp_socket(const UdpOptions& opt) {
     set_int(s.get(), SOL_SOCKET, SO_REUSEPORT, 1, "setsockopt(SO_REUSEPORT)");
 #endif
     if (opt.rcvbuf != 0) {
-        set_int(s.get(), SOL_SOCKET, SO_RCVBUF, opt.rcvbuf, "setsockopt(SO_RCVBUF)");
+#ifdef SO_RCVBUFFORCE
+        if (::setsockopt(s.get(), SOL_SOCKET, SO_RCVBUFFORCE, &opt.rcvbuf, sizeof(opt.rcvbuf)) != 0)
+#endif
+        {
+            set_int(s.get(), SOL_SOCKET, SO_RCVBUF, opt.rcvbuf, "setsockopt(SO_RCVBUF)");
+        }
     }
     if (opt.sndbuf != 0) {
         set_int(s.get(), SOL_SOCKET, SO_SNDBUF, opt.sndbuf, "setsockopt(SO_SNDBUF)");
@@ -132,6 +137,15 @@ Fd udp_socket(const UdpOptions& opt) {
     }
     set_nonblocking(s.get(), true);
     return s;
+}
+
+int effective_rcvbuf(int fd) {
+    int       v = 0;
+    socklen_t len = sizeof(v);
+    if (::getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &v, &len) != 0) {
+        fail("getsockopt(SO_RCVBUF)");
+    }
+    return v;
 }
 
 Endpoint local_endpoint(int fd) {

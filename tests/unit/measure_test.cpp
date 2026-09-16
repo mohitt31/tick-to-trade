@@ -56,9 +56,11 @@ TEST(Histogram, MergeAndMove) {
 }
 
 TEST(Trailer, RoundTripAndStrip) {
-    Bytes packet(40, std::byte{0x42});
-    Bytes datagram = packet;
-    datagram.resize(packet.size() + kTrailerSize);
+    const Bytes packet(40, std::byte{0x42});
+    // Built at its final size: GCC 14 reports copy-then-resize as writing past
+    // the copied buffer, which it does not.
+    Bytes datagram(packet.size() + kTrailerSize, std::byte{0});
+    std::copy(packet.begin(), packet.end(), datagram.begin());
     const Trailer t{1, 12345, 1'000'000'000'000ULL, 1'000'000'000'777ULL};
     store_trailer(std::span<std::byte>(datagram).subspan(packet.size()), t);
 
