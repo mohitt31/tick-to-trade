@@ -23,3 +23,21 @@ endfunction()
 ttt_test(unit_mold SOURCES unit/mold_test.cpp)
 ttt_test(unit_packet_stream SOURCES unit/packet_stream_test.cpp)
 ttt_test(unit_pcap_audit SOURCES unit/pcap_audit_test.cpp)
+ttt_test(unit_line_handler SOURCES unit/line_handler_test.cpp)
+ttt_test(unit_servers SOURCES unit/servers_test.cpp)
+ttt_test(property_chaos SOURCES property/chaos_test.cpp)
+
+# Every planted bug must make the chaos run report a failing seed, and the same
+# build with no bug switched on must pass, so a broken harness cannot look like
+# a caught mutant.
+if(TTT_MUTANTS)
+  set(TTT_MUTANT_NAMES OverlapMisnumbered ApplyDuplicates IgnoreControlFrontier
+      SlotSeqUnchecked SnapshotLabelOffByOne SnapshotReversedQueue)
+  foreach(m IN LISTS TTT_MUTANT_NAMES)
+    add_test(NAME mutant.${m}
+      COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/mutants/expect_caught.sh $<TARGET_FILE:ttt_chaos> ${m})
+    set_tests_properties(mutant.${m} PROPERTIES TIMEOUT 600)
+  endforeach()
+  add_test(NAME mutant.control COMMAND ttt_chaos --seeds 2000)
+  set_tests_properties(mutant.control PROPERTIES TIMEOUT 600)
+endif()

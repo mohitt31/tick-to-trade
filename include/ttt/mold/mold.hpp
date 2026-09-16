@@ -247,4 +247,34 @@ private:
     return DecodeError::None;
 }
 
+// A retransmission request: a header with no body, count in 1..0xFFFE.
+[[nodiscard]] inline std::array<std::byte, kHeaderSize> encode_request(const Session& session,
+                                                                       u64            first,
+                                                                       u16 count) noexcept {
+    ITCH_ASSERT_MSG(count != kHeartbeatCount && count != kEndOfSessionCount,
+                    "a request must ask for 1..0xFFFE messages");
+    std::array<std::byte, kHeaderSize> out{};
+    store_header(out, Header{session, first, count});
+    return out;
+}
+
+[[nodiscard]] inline bool decode_request(std::span<const std::byte> in, Header& out) noexcept {
+    if (in.size() != kHeaderSize) {
+        return false;
+    }
+    std::array<char, kSessionSize> name{};
+    for (std::size_t i = 0; i < kSessionSize; ++i) {
+        name[i] = static_cast<char>(in[i]);
+    }
+    Header h;
+    h.session = Session(std::string_view(name.data(), name.size()));
+    h.sequence = itch::load_be<u64>(in.data() + kSessionSize);
+    h.count = itch::load_be<u16>(in.data() + kSessionSize + 8);
+    if (h.kind() != Kind::Messages || h.sequence == 0 || h.sequence > ~u64{0} - h.count) {
+        return false;
+    }
+    out = h;
+    return true;
+}
+
 }  // namespace ttt::mold

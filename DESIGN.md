@@ -131,3 +131,117 @@ The pcap writer computes real IPv4 and UDP checksums (`tcpdump -vv` reports
 datagram. A capture taken on the sending host sees unfilled checksums when the
 NIC offloads them, and dropping those would turn an offload artefact into fake
 loss.
+
+## 7. Arbitration and recovery: one state machine, no I/O
+
+`LineHandler` takes packets, snapshots and timer expiries with the current time,
+and asks for everything else through an Actions object: apply a message, ask for
+a retransmission, ask for a snapshot. It is the same shape as the replayer and
+for the same reason. The chaos harness drives it in simulated time, and the
+Linux receiver will drive it from sockets without changing a line of it.
+
+**First-wins at message level, not packet level.** A message is applied the
+first time its sequence number is the next one expected, whichever feed it came
+on. Packet-level arbitration (take whichever copy of packet N arrives first)
+only works if both feeds split messages into identical packets. MoldUDP64 does
+not promise that, and the chaos harness deliberately gives feed B a different
+packet budget. A packet straddling the frontier contributes exactly its unseen
+tail.
+
+**The frontier comes from control packets too.** A gap is open whenever
+something has revealed a sequence number beyond the next expected one. Data
+packets reveal it, and so do heartbeats and end of session. Without that, losing
+the last packets before a quiet period is invisible. The `IgnoreControlFrontier`
+mutant is exactly that bug. The chaos harness catches it on seed 1 as a run that
+never converges.
+
+**Escalation.** A gap first waits `arb_wait_ns` for the other feed. Then the
+handler asks the rewind server for the first hole only: up to the first message
+it already holds, not the whole range to the frontier. Asking for the whole range
+re-sends messages already buffered and makes each request larger than it needs
+to be. The attempt count starts over whenever the hole moves, because a hole that
+moves is progress. A gap larger than `max_retransmit_count`, or one that exhausts
+its attempts, goes to a snapshot. Snapshots retry on timeout forever. A receiver
+that gives up has no correct state left to fall back to.
+
+**Held messages live in `SeqSlots`, a direct-mapped table keyed by sequence
+number.** Slot `s & (C-1)`, one cache line each, and each slot records which
+sequence it holds. On a collision the newer message wins. A lookup can miss, but
+it can never return the wrong message. The `SlotSeqUnchecked` mutant removes the
+sequence check, and the book's own assertions catch it on seed 1. Rejected: a
+window relative to the next expected message. It needs an overflow policy, and
+during a snapshot, when that message is frozen, everything is outside the window.
+
+**The book is never wrong, only behind.** In-order messages move it forward one
+at a time. A snapshot replaces it in one step, and only once the snapshot has
+fully decoded. A snapshot older than the book is ignored, never applied
+backwards. So at every instant the book is exactly the state after the last
+applied message. `stale()` says whether that is also the latest state.
+
+## 8. Snapshots are ITCH
+
+A snapshot is the symbol's stock directory message followed by one Add Order per
+resting order, level by level, each level in queue order. The receiver rebuilds
+its book by feeding those through the same Project 1 builder it uses for live
+data, so there is no second path that could disagree about what a book is.
+Queue order is load-bearing: adding orders back in that order is what restores
+time priority. The `SnapshotReversedQueue` mutant writes each level back to
+front. Depth and quantities are still right, and only the digest that includes
+queue order catches it.
+
+The rewind server answers a request only if it holds every message asked for.
+A partial answer would look like progress while leaving the hole where it was.
+
+## 9. The chaos harness
+
+`ttt_chaos` runs generator, both feeds, both servers, the receiver and an oracle
+book in one process, as a discrete-event simulation where every fault comes from
+one seed. Faults per seed are drawn independently with weight on the extremes: a
+dead feed, Gilbert-Elliott burst loss, duplication, jitter large enough to
+reorder, joint outages on both feeds including one over the tail of the stream,
+a rewind server that holds eight messages or never answers, snapshots that fail,
+and an arbitration buffer of eight slots. Faults stop when the stream ends and
+end of session is repeated, so every run must converge.
+
+**What is checked, and when.** After every message the receiver applies, the
+oracle (a second book fed the clean stream) is advanced to the same sequence and
+the two are compared on counts, quantities and best prices. After every handler
+step and every snapshot, the full book digest is compared, including queue
+order. At the end, every message must have been applied, the handler must be
+live, and end of session must have been seen. Applying a sequence number out of
+order is a failure on the spot.
+
+**The checker has been shown to catch bugs.** Six planted bugs sit behind
+`TTT_MUTANT`, compiled only in the `mutants` preset. Each one's test passes only
+if the harness actually ran and reported a failing seed, and a control run in the
+same build with no bug switched on has to pass 2,000 seeds. Where each was caught
+first:
+
+| Mutant | First failing seed | Caught by |
+|---|---|---|
+| OverlapMisnumbered | 2 | Project 1 book assertion |
+| ApplyDuplicates | 2 | sequence check |
+| IgnoreControlFrontier | 1 | did not converge |
+| SlotSeqUnchecked | 1 | Project 1 book assertion |
+| SnapshotLabelOffByOne | 10 | Project 1 book assertion |
+| SnapshotReversedQueue | 1 | oracle digest (queue order) |
+
+Three are caught by Project 1's book asserting on an impossible operation before
+the oracle comparison runs. That counts as caught, but it means those bugs are
+caught because they produce operations the book rejects. A bug that produced
+valid but wrong operations would have to be caught by the oracle, and
+`SnapshotReversedQueue` is the case that shows the oracle does.
+
+**The full run.** Seeds 1 to 100,000, release build, on the M4:
+
+```
+ttt_chaos --seeds 100000 --keep-going
+seeds 1..100000  failed 0
+messages 153000485  per-message checks 112290120  digest checks 76408919
+gaps 754181  retransmit requests 460373  snapshots applied 80326  evictions 20341700  duplicates dropped 68357344
+```
+
+Per-message checks are fewer than messages because a snapshot moves the book past
+the messages it replaced in one step. Those are covered by the digest check at
+the snapshot instead. The same harness runs 3,000 seeds clean under ASan and
+UBSan, and `ctest` runs 300 seeds in every preset.
