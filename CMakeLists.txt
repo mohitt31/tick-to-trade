@@ -42,7 +42,10 @@ add_library(itch STATIC ${ITCH_DIR}/src/assert.cpp)
 target_include_directories(itch PUBLIC ${ITCH_DIR}/include)
 target_link_libraries(itch PUBLIC ttt_options)
 
+find_package(ZLIB REQUIRED)
+
 add_subdirectory(src)
+add_subdirectory(apps)
 
 if(TTT_BUILD_TESTS)
   enable_testing()

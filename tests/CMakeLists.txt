@@ -16,8 +16,10 @@ function(ttt_test name)
   target_link_libraries(${name} PRIVATE ttt ${T_LIBS} GTest::gtest_main ttt_test_warnings)
   target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   # PRE_TEST: discover when ctest runs, so a sanitizer abort is a failing test
-  # rather than a broken build.
-  gtest_discover_tests(${name} DISCOVERY_MODE PRE_TEST)
+  # rather than a broken build. The timeout turns a hang into a failure.
+  gtest_discover_tests(${name} DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 300)
 endfunction()
 
 ttt_test(unit_mold SOURCES unit/mold_test.cpp)
+ttt_test(unit_packet_stream SOURCES unit/packet_stream_test.cpp)
+ttt_test(unit_pcap_audit SOURCES unit/pcap_audit_test.cpp)

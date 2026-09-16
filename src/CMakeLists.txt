@@ -1,5 +1,7 @@
 add_library(ttt STATIC
-  header_check.cpp)
+  audit/sequence_audit.cpp
+  header_check.cpp
+  pcap/pcap.cpp)
 target_include_directories(ttt PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(ttt
   PUBLIC itch ttt_options
