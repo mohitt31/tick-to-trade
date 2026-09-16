@@ -84,6 +84,8 @@ struct FeedServerConfig {
     u64                  eos_interval_ns = 50'000'000;
     u32                  eos_repeats = 10;
     bool                 faults_on = false;
+    bool                 trailer = false;    // append a measurement trailer to feed datagrams
+    bool                 busy_wait = false;  // spin between packets instead of sleeping in poll()
     SendFaults           faults{};
 };
 

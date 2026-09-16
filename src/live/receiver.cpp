@@ -9,6 +9,7 @@
 #include "itch/book/book_types.hpp"
 #include "itch/core/endian.hpp"
 #include "ttt/core/clock.hpp"
+#include "ttt/measure/trailer.hpp"
 #include "ttt/mold/mold.hpp"
 
 namespace ttt::live {
@@ -142,7 +143,10 @@ struct Receiver::Impl {
     }
 
     ReceiverResult run(const std::atomic<bool>& stop) {
-        ReceiverResult               res;
+        ReceiverResult res;
+        if (cfg.record_latency) {
+            res.latency.emplace();
+        }
         std::array<std::byte, 65536> buf{};
         u64                          last_rx = now_ns();
         Bytes                        snapshot;
@@ -187,9 +191,26 @@ struct Receiver::Impl {
                     if (net::recv_from(fdsrc[i], buf, got) != net::Io::Ok) {
                         break;
                     }
-                    last_rx = now_ns();
-                    handler.on_packet(sources[i], std::span<const std::byte>(buf.data(), got),
-                                      last_rx);
+                    const u64                  t_recv = now_ns();
+                    std::span<const std::byte> payload(buf.data(), got);
+                    last_rx = t_recv;
+                    // Only the feeds carry trailers; retransmissions do not.
+                    const bool timed = cfg.trailer && sources[i] != Source::Rewind;
+                    if (timed) {
+                        const auto t = measure::split_trailer(payload);
+                        if (!t) {
+                            if (res.latency) ++res.latency->without_trailer;
+                        } else if (res.latency) {
+                            res.latency->intended_to_recv.record(
+                                signed_diff(t_recv, t->intended_ns));
+                            res.latency->sent_to_recv.record(signed_diff(t_recv, t->sent_ns));
+                            res.latency->sender_lag.record(signed_diff(t->sent_ns, t->intended_ns));
+                        }
+                    }
+                    handler.on_packet(sources[i], payload, t_recv);
+                    if (timed && res.latency) {
+                        res.latency->handler.record(signed_diff(now_ns(), t_recv));
+                    }
                 }
             }
             if (n == 4 && fds[3].revents != 0) {
@@ -214,6 +235,10 @@ struct Receiver::Impl {
     }
 
     using Source = feed::Source;
+
+    static itch::i64 signed_diff(u64 a, u64 b) noexcept {
+        return a >= b ? static_cast<itch::i64>(a - b) : -static_cast<itch::i64>(b - a);
+    }
 };
 
 Receiver::Receiver(const ReceiverConfig& cfg) : impl_(std::make_unique<Impl>(cfg)) {}

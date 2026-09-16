@@ -14,6 +14,12 @@
 //   --arb-wait-ns N  --retransmit-timeout-ns N  --max-retransmit N  --snapshot-timeout-ns N
 //   --idle-timeout-ms N        stop when nothing arrives this long (default 5000)
 //   --expect-digest HEX        exit 1 unless the final book digest matches
+//   --trailer                  feed datagrams carry the measurement trailer
+//   --latency-out PREFIX       record latency (needs --trailer); writes PREFIX-<name>.hgrm,
+//                              each headed by the machine manifest
+//   --manifest-iface NAME      also describe this interface in the manifest (Linux)
+//
+// Latency needs the sender on the same host: both sides read one clock.
 //
 // Exit status 0 when end of session was seen, the book is complete, and the
 // digest matches if one was given.
@@ -25,6 +31,7 @@
 #include <string>
 
 #include "ttt/live/receiver.hpp"
+#include "ttt/measure/manifest.hpp"
 
 using namespace ttt;
 using itch::u32;
@@ -62,8 +69,10 @@ int main(int argc, char** argv) try {
     cfg.feed[1] = ep("239.1.1.2:30001");
     cfg.rewind_server = ep("127.0.0.1:31001");
     cfg.snapshot_server = ep("127.0.0.1:31002");
-    bool check_digest = false;
-    u64  expect = 0;
+    bool        check_digest = false;
+    u64         expect = 0;
+    std::string latency_out;
+    std::string manifest_iface;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -101,6 +110,13 @@ int main(int argc, char** argv) try {
             cfg.line.snapshot_timeout_ns = num(val());
         } else if (a == "--idle-timeout-ms") {
             cfg.idle_timeout_ns = num(val()) * 1'000'000;
+        } else if (a == "--trailer") {
+            cfg.trailer = true;
+        } else if (a == "--latency-out") {
+            latency_out = val();
+            cfg.record_latency = true;
+        } else if (a == "--manifest-iface") {
+            manifest_iface = val();
         } else if (a == "--expect-digest") {
             expect = num(val(), 16);
             check_digest = true;
@@ -108,6 +124,8 @@ int main(int argc, char** argv) try {
             usage("unknown option " + a);
         }
     }
+
+    if (cfg.record_latency && !cfg.trailer) usage("--latency-out needs --trailer");
 
     std::signal(SIGINT, [](int) { g_stop = true; });
     live::Receiver             rx(cfg);
@@ -126,6 +144,31 @@ int main(int argc, char** argv) try {
                 l.duplicates, l.gaps_opened, l.retransmit_requests, l.snapshots_applied,
                 r.snapshot_connects, r.snapshot_failures);
     std::printf("book digest %s %016" PRIx64 "\n", cfg.symbol.c_str(), r.digest);
+
+    if (r.latency) {
+        const measure::Manifest manifest = measure::collect_manifest(
+            measure::ManifestOptions{manifest_iface, "ttt_recv recvfrom poll loop"});
+        const std::pair<const char*, const measure::Histogram*> hists[] = {
+            {"intended_to_recv", &r.latency->intended_to_recv},
+            {"sent_to_recv", &r.latency->sent_to_recv},
+            {"sender_lag", &r.latency->sender_lag},
+            {"handler", &r.latency->handler},
+        };
+        for (const auto& [name, h] : hists) {
+            std::printf("%-17s %s\n", name, h->summary().c_str());
+            const std::string path = latency_out + "-" + name + ".hgrm";
+            std::FILE*        f = std::fopen(path.c_str(), "w");
+            if (f == nullptr) {
+                std::fprintf(stderr, "ttt_recv: cannot write %s\n", path.c_str());
+                return 1;
+            }
+            measure::write_manifest(f, manifest);
+            std::fprintf(f, "# histogram: %s (values in microseconds)\n", name);
+            h->write_hgrm(f);
+            std::fclose(f);
+        }
+        std::printf("datagrams without a trailer: %" PRIu64 "\n", r.latency->without_trailer);
+    }
 
     bool ok = r.ended && !r.stale;
     if (check_digest && r.digest != expect) {

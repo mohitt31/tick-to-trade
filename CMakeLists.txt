@@ -44,6 +44,27 @@ target_link_libraries(itch PUBLIC ttt_options)
 
 find_package(ZLIB REQUIRED)
 
+# HdrHistogram_c for latency capture, pinned by hash. Static library only, and
+# without its log component, which is what would pull in zlib and threads.
+include(FetchContent)
+set(HDR_HISTOGRAM_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(HDR_HISTOGRAM_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+# Its install(EXPORT) needs one installed target; nothing here is installed.
+set(HDR_HISTOGRAM_INSTALL_STATIC ON CACHE BOOL "" FORCE)
+set(HDR_LOG_REQUIRED "DISABLED" CACHE STRING "" FORCE)
+FetchContent_Declare(hdr_histogram
+  URL https://github.com/HdrHistogram/HdrHistogram_c/archive/refs/tags/0.11.10.tar.gz
+  URL_HASH SHA256=c3b06d077e680d112abf9f027d8a558f1176ee4a55a7c523577833391d8c2249
+  DOWNLOAD_EXTRACT_TIMESTAMP ON)
+FetchContent_MakeAvailable(hdr_histogram)
+
+# Which commit a binary was built from, refreshed on every build so a
+# measurement can never be attributed to the wrong code.
+add_custom_target(ttt_version
+  COMMAND ${CMAKE_COMMAND} -DSRC=${PROJECT_SOURCE_DIR} -DOUT=${PROJECT_BINARY_DIR}/generated/ttt/version.hpp
+          -P ${PROJECT_SOURCE_DIR}/cmake/version.cmake
+  BYPRODUCTS ${PROJECT_BINARY_DIR}/generated/ttt/version.hpp)
+
 add_subdirectory(src)
 add_subdirectory(apps)
 

@@ -19,6 +19,8 @@
 //   --outage FROM:TO           drop sequence numbers [FROM, TO) on both feeds (repeatable)
 //   --response-drop-ppm N      lose retransmission replies
 //   --snapshot-cut-ppm N       close snapshot connections halfway
+//   --trailer                  append the measurement trailer (intended and actual send time)
+//   --busy-wait                spin between packets instead of sleeping (measurement pacing)
 //
 // Prints the snapshot server's final book digest; a receiver that got
 // everything prints the same one.
@@ -177,6 +179,10 @@ int main(int argc, char** argv) try {
         } else if (a == "--response-drop-ppm") {
             cfg.faults_on = true;
             cfg.faults.response_drop_ppm = static_cast<u32>(num(val()));
+        } else if (a == "--trailer") {
+            cfg.trailer = true;
+        } else if (a == "--busy-wait") {
+            cfg.busy_wait = true;
         } else if (a == "--snapshot-cut-ppm") {
             cfg.faults_on = true;
             cfg.faults.snapshot_cut_ppm = static_cast<u32>(num(val()));

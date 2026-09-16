@@ -29,6 +29,7 @@ ttt_test(unit_packet_stream SOURCES unit/packet_stream_test.cpp)
 ttt_test(unit_pcap_audit SOURCES unit/pcap_audit_test.cpp)
 ttt_test(unit_line_handler SOURCES unit/line_handler_test.cpp)
 ttt_test(unit_servers SOURCES unit/servers_test.cpp)
+ttt_test(unit_measure SOURCES unit/measure_test.cpp)
 ttt_test(property_chaos SOURCES property/chaos_test.cpp)
 
 # Every planted bug must make the chaos run report a failing seed, and the same

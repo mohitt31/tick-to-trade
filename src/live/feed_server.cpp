@@ -9,6 +9,7 @@
 #include "itch/core/endian.hpp"
 #include "ttt/core/clock.hpp"
 #include "ttt/core/rng.hpp"
+#include "ttt/measure/trailer.hpp"
 #include "ttt/mold/packer.hpp"
 #include "ttt/replay/servers.hpp"
 
@@ -24,6 +25,7 @@ struct Held {
     u64   release_ns;
     u64   order;
     int   feed;
+    u64   intended_ns;  // absolute; for the trailer
     Bytes bytes;
 };
 
@@ -57,6 +59,9 @@ struct FeedServer::Impl {
     std::priority_queue<Held, std::vector<Held>, LaterHeld> held;
     u64                                                     held_order = 0;
     bool                                                    burst_bad[2] = {false, false};
+    u64                                                     start = 0;
+    u64                                                     index[2] = {0, 0};
+    Bytes                                                   out_buf;
 
     Impl(const FeedServerConfig& c, std::unique_ptr<AnySource> a, std::unique_ptr<AnySource> b)
         : cfg(c),
@@ -118,8 +123,20 @@ struct FeedServer::Impl {
         }
     }
 
-    void send_now(int f, std::span<const std::byte> bytes) {
-        if (net::send_to(send_fd.get(), cfg.feed[f], bytes) == net::Io::Ok) {
+    // intended_ns is absolute. With the trailer on, the actual send time is
+    // stamped as late as possible, after the copy and just before the call.
+    void send_now(int f, std::span<const std::byte> bytes, u64 intended_ns) {
+        std::span<const std::byte> out = bytes;
+        if (cfg.trailer) {
+            out_buf.resize(bytes.size() + measure::kTrailerSize);
+            std::copy(bytes.begin(), bytes.end(), out_buf.begin());
+            const std::span<std::byte> tail =
+                std::span<std::byte>(out_buf).subspan(bytes.size(), measure::kTrailerSize);
+            measure::store_trailer(tail, measure::Trailer{static_cast<itch::u16>(f), index[f]++,
+                                                          intended_ns, now_ns()});
+            out = out_buf;
+        }
+        if (net::send_to(send_fd.get(), cfg.feed[f], out) == net::Io::Ok) {
             ++stats.sent[f];
         } else {
             ++stats.send_errors;
@@ -128,8 +145,9 @@ struct FeedServer::Impl {
 
     // The faulty network, at the send path.
     void transmit(int f, const Bytes& bytes, u64 t) {
+        const u64 intended = start + due[f];
         if (!faults_active()) {
-            send_now(f, bytes);
+            send_now(f, bytes, intended);
             return;
         }
         const sim::ChannelFaults& ch = cfg.faults.feed[f];
@@ -154,9 +172,9 @@ struct FeedServer::Impl {
         for (int c = 0; c < copies; ++c) {
             const u64 delay = ch.jitter_ns == 0 ? 0 : rng.range(0, ch.jitter_ns);
             if (delay == 0) {
-                send_now(f, bytes);
+                send_now(f, bytes, intended);
             } else {
-                held.push(Held{t + delay, held_order++, f, bytes});
+                held.push(Held{t + delay, held_order++, f, intended, bytes});
             }
         }
     }
@@ -203,11 +221,11 @@ struct FeedServer::Impl {
     }
 
     FeedServerStats run(const std::atomic<bool>& stop) {
-        const u64 start = now_ns() + cfg.start_delay_ns;
-        u32       eos_left = cfg.eos_repeats;
-        u64       eos_due = 0;
-        bool      eos_scheduled = false;
-        u64       eos_seq = cfg.stream[0].first_sequence;
+        start = now_ns() + cfg.start_delay_ns;
+        u32  eos_left = cfg.eos_repeats;
+        u64  eos_due = 0;
+        bool eos_scheduled = false;
+        u64  eos_seq = cfg.stream[0].first_sequence;
 
         while (!stop.load(std::memory_order_relaxed)) {
             const u64  now = now_ns();
@@ -233,7 +251,7 @@ struct FeedServer::Impl {
                 pull(f);
             }
             while (!held.empty() && held.top().release_ns <= t) {
-                send_now(held.top().feed, held.top().bytes);
+                send_now(held.top().feed, held.top().bytes, held.top().intended_ns);
                 held.pop();
             }
 
@@ -246,7 +264,7 @@ struct FeedServer::Impl {
                 mold::Packer p(cfg.session, eos_seq, mold::kMaxPayloadStandardMtu);
                 const auto   eos = p.end_of_session();
                 for (int f = 0; f < 2; ++f) {
-                    send_now(f, eos);
+                    send_now(f, eos, start + eos_due);
                 }
                 --eos_left;
                 eos_due = t + cfg.eos_interval_ns;
@@ -269,7 +287,11 @@ struct FeedServer::Impl {
             const u64 now2 = now_ns();
             const u64 t2 = now2 > start ? now2 - start : 0;
             const u64 wait_ns = next > t2 ? next - t2 : 0;
-            if (wait_ns > 2'000'000 || !started) {
+            if (cfg.busy_wait && started) {
+                // Measurement pacing: never sleep, only check for requests.
+                pollfd fds[2] = {{rewind_fd.get(), POLLIN, 0}, {listen_fd.get(), POLLIN, 0}};
+                (void)::poll(fds, 2, 0);
+            } else if (wait_ns > 2'000'000 || !started) {
                 pollfd    fds[2] = {{rewind_fd.get(), POLLIN, 0}, {listen_fd.get(), POLLIN, 0}};
                 const int ms = static_cast<int>(std::min<u64>(wait_ns / 1'000'000 - 1, 20));
                 (void)::poll(fds, 2, std::max(ms, 0));

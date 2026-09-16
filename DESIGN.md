@@ -288,3 +288,46 @@ requests and 28 snapshots (12 more were cut and rejected), and ended with digest
 `504dc49447f624b4`, the server's own. That is a correctness result on loopback,
 not a timing one. `max lag` in the server's output is how late its `poll()` loop
 sent against schedule, and it is why this loop is not the measurement sender.
+
+## 11. Measurement plumbing
+
+**Latency is measured against the schedule, and the sender's own lateness is
+measured separately.** In measurement mode every feed datagram carries a 32-byte
+trailer after the MoldUDP64 packet, holding the packet's intended send time and
+the time the sender actually called `sendto`. A receiver on the same host reads
+the same clock and records three things: schedule to receive, send to receive,
+and sender lag. The first is the coordinated-omission-safe number. The split says
+how much of it was the sender. A receiver in trailer mode strips the trailer
+before decoding, so the codec stays strict, and nothing outside a measurement run
+ever carries one.
+
+A first run on the M4 showed why the split is needed. With `--busy-wait`, the
+schedule-to-receive p99 was 2.4 ms, and nearly all of it was sender lag (p99
+2.4 ms). Send to receive had a p99 of 50 µs. The sender's loop also feeds the
+rewind and snapshot servers, so the book work sits on the send thread. That is
+fine for correctness runs and wrong for measurement, and it is what the Linux
+measurement sender has to fix. These are Mac figures with no pinning or
+isolation, so they are a reason for a design choice and nothing more. None of
+them goes in NUMBERS.md.
+
+**The clock is `CLOCK_MONOTONIC_RAW` on macOS and `CLOCK_MONOTONIC` on Linux.**
+macOS's `CLOCK_MONOTONIC` advanced in steps of exactly 1000 ns over a million
+consecutive readings on the M4, while `CLOCK_MONOTONIC_RAW` stepped at 41 ns.
+With the first, every sub-microsecond latency is rounding. A test asserts that
+consecutive readings can differ by less than a microsecond.
+
+**HdrHistogram_c, pinned by hash, values recorded as given.** No coordinated
+omission correction on top: the schedule already avoids the problem, and
+correcting again would double count. Values outside the tracked range are
+clamped and counted, and the summary says so.
+
+**Every result file starts with a manifest of what the machine actually was.**
+On Linux that is the kernel command line, isolated and nohz_full CPUs, governor
+and EPP, idle driver and C-state limit, THP mode, RT throttling, busy-poll
+sysctls, maximum temperature and throttle count, the process's CPU affinity and
+locked memory, and for the interface its driver, XDP mode, IRQ affinities (allowed
+and effective), coalescing and EEE. On macOS it includes Low Power Mode and power
+source, because Project 1 found Low Power Mode halves throughput. It always
+includes the commit, regenerated on every build with a `-dirty` suffix, so a
+number can always be traced to its code. Everything is read from the kernel at
+run time, never taken from what a setup script meant to set.

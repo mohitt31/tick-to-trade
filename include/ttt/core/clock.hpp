@@ -1,6 +1,9 @@
 // Monotonic time, and waiting for a deadline without sleeping through it.
 //
-// Everything here is CLOCK_MONOTONIC in nanoseconds. It is the clock both the
+// Everything here is a monotonic clock in nanoseconds: CLOCK_MONOTONIC on Linux,
+// CLOCK_MONOTONIC_RAW on macOS. macOS's CLOCK_MONOTONIC only moves in whole
+// microseconds (measured: every step was 1000 ns), which would turn every
+// sub-microsecond latency into rounding; its _RAW clock steps at 41 ns. It is the clock both the
 // sender and a receiver on the same host can read, which is what lets a
 // same-host latency be computed at all. The TSC-based clock for the Linux
 // measurements is a separate piece and replaces this only where it has been
@@ -17,9 +20,15 @@
 
 namespace ttt {
 
+#ifdef __APPLE__
+inline constexpr clockid_t kClock = CLOCK_MONOTONIC_RAW;
+#else
+inline constexpr clockid_t kClock = CLOCK_MONOTONIC;
+#endif
+
 [[nodiscard]] inline itch::u64 now_ns() noexcept {
     timespec ts{};
-    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    ::clock_gettime(kClock, &ts);
     return static_cast<itch::u64>(ts.tv_sec) * 1'000'000'000u + static_cast<itch::u64>(ts.tv_nsec);
 }
 

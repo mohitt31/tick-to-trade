@@ -76,7 +76,7 @@ Outcome run_pair(const Stream& s, ReceiverConfig rc, FeedServerConfig fc) {
     // The receiver stops as soon as its book is complete; let the sender finish
     // its end-of-session repeats rather than cutting it off.
     t.join();
-    return {r, tx_stats};
+    return {std::move(r), tx_stats};
 }
 
 FeedServerConfig server_config(u64 pps) {
@@ -159,6 +159,30 @@ TEST(Loopback, FaultyRunRecoversToTheOracle) {
     EXPECT_GT(out.rx.line.duplicates, 0u);
     EXPECT_GT(out.rx.line.retransmit_requests, 0u);
     EXPECT_GT(out.rx.line.snapshots_applied, 0u);
+}
+
+// With the trailer on, every feed datagram the receiver handled carries one, and
+// the split is consistent: send-to-receive can never exceed schedule-to-receive,
+// since the sender cannot send before its schedule by more than clock noise.
+TEST(Loopback, TrailerLatencyIsRecordedForEveryFeedDatagram) {
+    const Stream   s = make_stream(4, 20'000);
+    ReceiverConfig rc = receiver_config();
+    rc.trailer = true;
+    rc.record_latency = true;
+    FeedServerConfig fc = server_config(5'000);
+    fc.trailer = true;
+
+    const auto out = run_pair(s, rc, fc);
+    ASSERT_EQ(out.rx.stopped_because, "end of session, book complete");
+    EXPECT_EQ(out.rx.digest, s.digest);
+    ASSERT_TRUE(out.rx.latency.has_value());
+    const auto& l = *out.rx.latency;
+    EXPECT_EQ(l.without_trailer, 0u);
+    EXPECT_EQ(l.intended_to_recv.count(), out.rx.line.packets[0] + out.rx.line.packets[1]);
+    EXPECT_EQ(l.sent_to_recv.count(), l.intended_to_recv.count());
+    EXPECT_EQ(l.sent_to_recv.clamped_low(), 0u);
+    EXPECT_EQ(l.intended_to_recv.clamped_high(), 0u);
+    EXPECT_LE(l.sent_to_recv.at(50.0), l.intended_to_recv.at(50.0));
 }
 
 TEST(Loopback, MulticastGroups) {
