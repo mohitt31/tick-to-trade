@@ -1,6 +1,7 @@
 // Compiles every header under the strict project warning set. Tests include
 // them too, but with lighter warnings.
 #include "ttt/audit/sequence_audit.hpp"
+#include "ttt/core/clock.hpp"
 #include "ttt/core/mutant.hpp"
 #include "ttt/core/rng.hpp"
 #include "ttt/feed/book_sink.hpp"
@@ -8,9 +9,14 @@
 #include "ttt/feed/seq_slots.hpp"
 #include "ttt/feed/snapshot_wire.hpp"
 #include "ttt/itch/encode.hpp"
+#include "ttt/live/feed_server.hpp"
+#include "ttt/live/receiver.hpp"
 #include "ttt/mold/mold.hpp"
 #include "ttt/mold/packer.hpp"
+#include "ttt/net/endpoint.hpp"
+#include "ttt/net/socket.hpp"
 #include "ttt/pcap/pcap.hpp"
+#include "ttt/replay/limited.hpp"
 #include "ttt/replay/packet_stream.hpp"
 #include "ttt/replay/servers.hpp"
 #include "ttt/sim/chaos.hpp"

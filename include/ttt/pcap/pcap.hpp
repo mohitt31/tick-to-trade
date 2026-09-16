@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "itch/core/types.hpp"
+#include "ttt/net/endpoint.hpp"
 
 namespace ttt::pcap {
 
@@ -28,17 +29,10 @@ using itch::u32;
 using itch::u64;
 using itch::u8;
 
-struct Endpoint {
-    std::array<u8, 4> ip{};
-    u16               port = 0;
-
-    friend bool operator==(const Endpoint&, const Endpoint&) = default;
-    friend auto operator<=>(const Endpoint&, const Endpoint&) = default;
-};
-
-// Parses "a.b.c.d:port". Returns false on anything else.
-[[nodiscard]] bool        parse_endpoint(const std::string& text, Endpoint& out);
-[[nodiscard]] std::string to_string(const Endpoint& e);
+// Endpoints live with the socket code; pcap uses the same type.
+using net::Endpoint;
+using net::parse_endpoint;
+using net::to_string;
 
 // The Ethernet destination for an IPv4 multicast group: 01:00:5e followed by
 // the low 23 bits of the group address.

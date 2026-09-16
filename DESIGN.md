@@ -245,3 +245,46 @@ Per-message checks are fewer than messages because a snapshot moves the book pas
 the messages it replaced in one step. Those are covered by the digest check at
 the snapshot instead. The same harness runs 3,000 seeds clean under ASan and
 UBSan, and `ctest` runs 300 seeds in every preset.
+
+## 10. The pipeline on real sockets
+
+`ttt_feedd` and `ttt_recv` are the chaos harness with the simulated network
+replaced by sockets: POSIX UDP for both feeds and for retransmission, TCP for
+snapshots, one thread and `poll()` on each side. The same `PacketStream`,
+`RewindServer`, `SnapshotServer` and `LineHandler` do the work. Only the loops
+around them are new. They build and run on macOS and Linux alike. This
+`recvfrom` loop is the portable baseline, not a measured receive path. The Linux
+paths replace the socket loop and leave the handler alone.
+
+A receiver binds a multicast feed to the group address, not `INADDR_ANY`, so a
+socket for feed A never sees feed B on the same port. Snapshots go over TCP as a
+4-byte length and the snapshot. A connection that closes early hands the handler
+whatever arrived, and the handler's all-or-nothing decoder rejects it. So a cut
+snapshot is handled by the same code path that rejects any other broken one.
+
+**Outages on a real clock are given as sequence ranges, not time windows.** The
+first version dropped both feeds for a window of sender time. One run in
+fifty-odd failed its coverage check, with no snapshot applied: the sender had
+stalled, and the packets due inside the window went out after it closed. A
+simulated clock cannot stall and a real one can, so the live server drops any
+packet carrying a message in `[from, to)` on both feeds instead. The loopback
+tests then place one outage that only a retransmission can fill and one larger
+than a retransmission may ask for, so both recovery paths run in every run.
+They pass 10 repeats in release, TSan and ASan.
+
+The feed server prints its snapshot book's digest at the end, and the receiver
+prints its own. Two processes over loopback multicast, on the first 3,000,000
+messages of the 2019-01-30 file with faults on:
+
+```
+ttt_recv --symbol AAPL --idle-timeout-ms 5000 &
+ttt_feedd --input 01302019.NASDAQ_ITCH50.gz --max-messages 3000000 --symbol AAPL \
+  --rate 50000 --budget-b 600 --faults 11:20000:10000:500000 \
+  --outage 1000000:1000500 --outage 2000000:2100000 --snapshot-cut-ppm 200000
+```
+
+The receiver applied all 3,000,000 messages through 40 gaps, 24 retransmission
+requests and 28 snapshots (12 more were cut and rejected), and ended with digest
+`504dc49447f624b4`, the server's own. That is a correctness result on loopback,
+not a timing one. `max lag` in the server's output is how late its `poll()` loop
+sent against schedule, and it is why this loop is not the measurement sender.

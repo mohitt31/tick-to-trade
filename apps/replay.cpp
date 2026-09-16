@@ -29,6 +29,7 @@
 #include "itch/wire/gzip_source.hpp"
 #include "itch/wire/source.hpp"
 #include "ttt/pcap/pcap.hpp"
+#include "ttt/replay/limited.hpp"
 #include "ttt/replay/packet_stream.hpp"
 
 using namespace ttt;
@@ -40,28 +41,6 @@ using itch::wire::FrameStatus;
 using itch::wire::GzipSource;
 
 namespace {
-
-// Stops a source after n messages, reporting a clean end of input.
-template <replay::MessageSource Inner>
-class Limited {
-public:
-    Limited(Inner inner, u64 limit) : inner_(std::move(inner)), left_(limit) {}
-
-    FrameStatus next(std::span<const std::byte>& out) {
-        if (left_ == 0) {
-            return FrameStatus::EndOfInput;
-        }
-        const FrameStatus st = inner_.next(out);
-        if (st == FrameStatus::Ok) {
-            --left_;
-        }
-        return st;
-    }
-
-private:
-    Inner inner_;
-    u64   left_;
-};
 
 [[noreturn]] void usage(const char* why) {
     std::fprintf(stderr, "ttt_replay: %s\nsee the comment at the top of apps/replay.cpp\n", why);
@@ -182,11 +161,12 @@ int main(int argc, char** argv) try {
 
     if (ends_with(input, ".gz")) {
         using Gz = FrameReader<GzipSource<FdSource>>;
-        return run(Limited<Gz>(Gz(GzipSource<FdSource>(FdSource(input))), max_messages), cfg, out,
-                   from, to, epoch_ns);
+        return run(replay::Limited<Gz>(Gz(GzipSource<FdSource>(FdSource(input))), max_messages),
+                   cfg, out, from, to, epoch_ns);
     }
     using Plain = FrameReader<FdSource>;
-    return run(Limited<Plain>(Plain(FdSource(input)), max_messages), cfg, out, from, to, epoch_ns);
+    return run(replay::Limited<Plain>(Plain(FdSource(input)), max_messages), cfg, out, from, to,
+               epoch_ns);
 } catch (const std::exception& ex) {
     std::fprintf(stderr, "ttt_replay: %s\n", ex.what());
     return 1;

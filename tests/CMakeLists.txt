@@ -9,15 +9,19 @@ FetchContent_MakeAvailable(googletest)
 
 include(GoogleTest)
 
-# ttt_test(<name> SOURCES ... [LIBS ...])
+# ttt_test(<name> [SERIAL] SOURCES ... [LIBS ...])
 function(ttt_test name)
-  cmake_parse_arguments(T "" "" "SOURCES;LIBS" ${ARGN})
+  cmake_parse_arguments(T "SERIAL" "" "SOURCES;LIBS" ${ARGN})
   add_executable(${name} ${T_SOURCES})
   target_link_libraries(${name} PRIVATE ttt ${T_LIBS} GTest::gtest_main ttt_test_warnings)
   target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   # PRE_TEST: discover when ctest runs, so a sanitizer abort is a failing test
   # rather than a broken build. The timeout turns a hang into a failure.
-  gtest_discover_tests(${name} DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 300)
+  set(serial FALSE)
+  if(T_SERIAL)
+    set(serial TRUE)
+  endif()
+  gtest_discover_tests(${name} DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 300 RUN_SERIAL ${serial})
 endfunction()
 
 ttt_test(unit_mold SOURCES unit/mold_test.cpp)
@@ -41,3 +45,6 @@ if(TTT_MUTANTS)
   add_test(NAME mutant.control COMMAND ttt_chaos --seeds 2000)
   set_tests_properties(mutant.control PROPERTIES TIMEOUT 600)
 endif()
+
+# Real sockets over loopback. Serial: they bind ports and pace in real time.
+ttt_test(e2e_loopback SERIAL SOURCES e2e/loopback_test.cpp)
