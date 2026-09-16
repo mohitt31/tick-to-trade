@@ -43,6 +43,7 @@ struct BenchConfig {
     bool               trailer = true;
     u64                idle_timeout_ns = 5'000'000'000;
     net::Endpoint      rewind_server{};  // port 0: no retransmission requests
+    u64 warmup_ns = 0;  // after the first datagram, latency is not recorded for this long
 };
 
 struct BenchResult {
@@ -100,6 +101,7 @@ BenchResult run_bench(Path& path, const BenchConfig& cfg, const std::atomic<bool
     audit::SequenceAudit seq;
     const net::Endpoint  flow{};
     u64                  last_rx = now_ns();
+    u64                  record_from = 0;  // set by the first datagram
     for (;;) {
         if (stop.load(std::memory_order_relaxed)) {
             res.rx.stopped_because = "stopped";
@@ -110,9 +112,16 @@ BenchResult run_bench(Path& path, const BenchConfig& cfg, const std::atomic<bool
             break;
         }
         const std::size_t n = path.receive([&](std::span<const std::byte> dgram, u64 t_recv) {
+            if (record_from == 0) {
+                record_from = t_recv + cfg.warmup_ns;
+            }
+            const bool recording = t_recv >= record_from;
             if (cfg.trailer) {
+                // The trailer is stripped from every datagram, warmup or not;
+                // only whether its times are recorded depends on the warmup.
                 const auto t = measure::split_trailer(dgram);
-                if (t) {
+                if (!recording) {
+                } else if (t) {
                     lat.intended_to_recv.record(diff(t_recv, t->intended_ns));
                     lat.sent_to_recv.record(diff(t_recv, t->sent_ns));
                     lat.sender_lag.record(diff(t->sent_ns, t->intended_ns));
@@ -121,7 +130,9 @@ BenchResult run_bench(Path& path, const BenchConfig& cfg, const std::atomic<bool
                 }
             }
             handler.on_packet(feed::Source::A, dgram, t_recv);
-            lat.handler.record(diff(now_ns(), t_recv));
+            if (recording) {
+                lat.handler.record(diff(now_ns(), t_recv));
+            }
             seq.observe(t_recv, flow, dgram);  // after the timed part
         });
         const u64         now = now_ns();

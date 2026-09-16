@@ -86,6 +86,12 @@ struct FeedServerConfig {
     bool                 faults_on = false;
     bool                 trailer = false;    // append a measurement trailer to feed datagrams
     bool                 busy_wait = false;  // spin between packets instead of sleeping in poll()
+    // Measurement mode. preload builds every packet before the first send, so
+    // reading and packing the input is not on the send path. servers=false
+    // runs no rewind or snapshot server, so the send thread does nothing
+    // between two sends but wait.
+    bool                 preload = false;
+    bool                 servers = true;
     SendFaults           faults{};
 };
 
@@ -101,6 +107,7 @@ struct FeedServerStats {
     u64 snapshots_cut = 0;
     u64 max_lag_ns = 0;   // how far behind schedule a packet left
     u64 book_digest = 0;  // the snapshot server's book at the end: what a receiver must match
+    u64 preloaded_bytes = 0;
 };
 
 class FeedServer {

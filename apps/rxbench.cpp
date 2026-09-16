@@ -21,6 +21,7 @@
 //   --latency-out PREFIX       write PREFIX-<histogram>.hgrm, each headed by the manifest
 //   --manifest-iface NAME      describe this interface in the manifest
 //   --idle-timeout-ms N        (default 5000)
+//   --warmup-ms N              do not record latency for the first N ms of traffic
 //
 // The sender must be ttt_feedd --trailer on the same host, so both read one clock.
 // Every knob set here is also read back from the kernel into the manifest.
@@ -221,6 +222,8 @@ int main(int argc, char** argv) try {
             manifest_iface = val();
         else if (a == "--idle-timeout-ms")
             bc.idle_timeout_ns = num(val()) * 1'000'000;
+        else if (a == "--warmup-ms")
+            bc.warmup_ns = num(val()) * 1'000'000;
         else
             usage("unknown option " + a);
     }

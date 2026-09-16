@@ -65,7 +65,8 @@ struct PathRun {
 
 // Builds the receive socket, lets make_path wrap it, and runs a sender at it.
 template <class MakePath>
-PathRun run_with(MakePath make_path, u64 pps = 20'000, std::size_t budget = 600) {
+PathRun run_with(MakePath make_path, u64 pps = 20'000, std::size_t budget = 600,
+                 u64 warmup_ns = 0) {
     net::UdpOptions o;
     o.bind = net::Endpoint{net::kLoopback, 0};
     o.rcvbuf = 8 << 20;
@@ -97,6 +98,7 @@ PathRun run_with(MakePath make_path, u64 pps = 20'000, std::size_t budget = 600)
     BenchConfig bc;
     bc.line.session = fc.session;
     bc.idle_timeout_ns = 2'000'000'000;
+    bc.warmup_ns = warmup_ns;
     BenchResult r = run_bench(*path, bc, stop);
     t.join();
     return {std::move(r), tx_stats};
@@ -111,7 +113,7 @@ void expect_complete(const PathRun& run) {
     EXPECT_EQ(r.unapplied, 0u);
     ASSERT_TRUE(r.rx.latency.has_value());
     EXPECT_EQ(r.rx.latency->without_trailer, 0u);
-    EXPECT_EQ(r.rx.latency->intended_to_recv.count(), r.path.datagrams);
+    EXPECT_EQ(r.rx.latency->intended_to_recv.count(), r.path.datagrams);  // no warmup here
     EXPECT_EQ(r.path.truncated, 0u);
     EXPECT_EQ(r.path.errors, 0u);
     EXPECT_GT(r.path.wakeups, 0u);
@@ -125,6 +127,22 @@ TEST(RxPaths, Recvfrom) {
     // One datagram per call, always.
     EXPECT_EQ(run.result.batch.max(), 1);
     EXPECT_EQ(run.result.path.wakeups, run.result.path.datagrams);
+}
+
+// A warmup must only stop latency being recorded. The first version also
+// stopped the trailer being stripped, so every warmup datagram reached the
+// decoder with 32 extra bytes and was rejected.
+TEST(RxPaths, WarmupSkipsRecordingNotDecoding) {
+    const PathRun run =
+        run_with([](int fd) { return std::make_unique<RecvfromPath>(fd, 10'000'000); }, 5'000, 600,
+                 100'000'000);  // about 300 ms of traffic, the first 100 ms unrecorded
+    const auto& r = run.result;
+    ASSERT_EQ(r.rx.stopped_because, "end of session, book complete");
+    EXPECT_EQ(r.rx.applied, stream().messages);
+    EXPECT_EQ(r.rx.line.decode_errors, 0u);
+    EXPECT_EQ(r.missing, 0u);
+    EXPECT_GT(r.rx.latency->intended_to_recv.count(), 0u);
+    EXPECT_LT(r.rx.latency->intended_to_recv.count(), r.path.datagrams);
 }
 
 TEST(RxPaths, RecvmmsgBatchesButNeverExceedsTheBatch) {

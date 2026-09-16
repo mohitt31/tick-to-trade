@@ -187,6 +187,30 @@ TEST(Loopback, TrailerLatencyIsRecordedForEveryFeedDatagram) {
     EXPECT_LE(l.sent_to_recv.at(50.0), l.intended_to_recv.at(50.0));
 }
 
+// Measurement mode: every packet built before the first send, no servers. The
+// receiver still gets every message, and end of session still announces the
+// right next sequence number without a rewind server to ask.
+TEST(Loopback, PreloadedSenderWithoutServers) {
+    const Stream     s = make_stream(5, 20'000);
+    FeedServerConfig fc = server_config(10'000);
+    fc.trailer = true;
+    fc.busy_wait = true;
+    fc.preload = true;
+    fc.servers = false;
+    fc.stream[0].budget = measure::kMaxPacketWithTrailer;
+    ReceiverConfig rc = receiver_config();
+    rc.trailer = true;
+    rc.record_latency = true;
+
+    const auto out = run_pair(s, rc, fc);
+    ASSERT_EQ(out.rx.stopped_because, "end of session, book complete");
+    EXPECT_EQ(out.rx.applied, s.msgs.size());
+    EXPECT_EQ(out.rx.digest, s.digest);
+    EXPECT_EQ(out.tx.messages, s.msgs.size());
+    EXPECT_GT(out.tx.preloaded_bytes, 0u);
+    EXPECT_EQ(out.tx.book_digest, 0u);  // no snapshot server, so no book
+}
+
 TEST(Loopback, MulticastGroups) {
     const Stream     s = make_stream(3, 10'000);
     ReceiverConfig   rc = receiver_config();

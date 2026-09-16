@@ -21,6 +21,11 @@
 //   --snapshot-cut-ppm N       close snapshot connections halfway
 //   --trailer                  append the measurement trailer (intended and actual send time)
 //   --busy-wait                spin between packets instead of sleeping (measurement pacing)
+//   --preload                  build every packet in memory before the first send
+//   --no-servers               no rewind or snapshot server; nothing on the send thread but sending
+//
+// A measurement sender is --trailer --busy-wait --preload --no-servers, pinned
+// to its own core.
 //
 // Prints the snapshot server's final book digest; a receiver that got
 // everything prints the same one.
@@ -183,6 +188,10 @@ int main(int argc, char** argv) try {
             cfg.trailer = true;
         } else if (a == "--busy-wait") {
             cfg.busy_wait = true;
+        } else if (a == "--preload") {
+            cfg.preload = true;
+        } else if (a == "--no-servers") {
+            cfg.servers = false;
         } else if (a == "--snapshot-cut-ppm") {
             cfg.faults_on = true;
             cfg.faults.snapshot_cut_ppm = static_cast<u32>(num(val()));
@@ -235,7 +244,14 @@ int main(int argc, char** argv) try {
                 " cut %" PRIu64 "\n",
                 s.rewind_served, s.rewind_unavailable, s.snapshots_served, s.snapshots_cut);
     std::printf("max lag %" PRIu64 " ns\n", s.max_lag_ns);
-    std::printf("book digest %s %016" PRIx64 "\n", cfg.symbol.c_str(), s.book_digest);
+    if (cfg.preload) {
+        std::printf("preloaded %" PRIu64 " bytes\n", s.preloaded_bytes);
+    }
+    if (cfg.servers) {
+        std::printf("book digest %s %016" PRIx64 "\n", cfg.symbol.c_str(), s.book_digest);
+    } else {
+        std::printf("book digest n/a (no servers)\n");
+    }
     return 0;
 } catch (const std::exception& ex) {
     std::fprintf(stderr, "ttt_feedd: %s\n", ex.what());

@@ -41,9 +41,9 @@ Histogram& Histogram::operator=(Histogram&& o) noexcept {
 }
 
 void Histogram::record(i64 ns) noexcept {
-    if (ns < 1) {
+    if (ns < 0) {
         ++clamped_low_;
-        ns = 1;
+        ns = 0;
     } else if (ns > highest_) {
         ++clamped_high_;
         ns = highest_;

@@ -34,9 +34,16 @@ TEST(Histogram, ClampingIsCountedNotHidden) {
     h.record(5'000'000);
     h.record(10);
     EXPECT_EQ(h.count(), 4u);
-    EXPECT_EQ(h.clamped_low(), 2u);
+    EXPECT_EQ(h.clamped_low(), 1u);  // only -5; zero is a value
     EXPECT_EQ(h.clamped_high(), 1u);
+    EXPECT_EQ(h.min(), 0);
     EXPECT_NE(h.summary().find("clamped"), std::string::npos);
+
+    Histogram zeros;
+    zeros.record(0);
+    zeros.record(0);
+    EXPECT_EQ(zeros.clamped_low(), 0u);
+    EXPECT_EQ(zeros.summary().find("clamped"), std::string::npos);
 }
 
 TEST(Histogram, MergeAndMove) {
@@ -44,7 +51,7 @@ TEST(Histogram, MergeAndMove) {
     Histogram b;
     a.record(100);
     b.record(200);
-    b.record(0);
+    b.record(-1);  // clamped, and the count has to survive the merge
     a.merge(b);
     EXPECT_EQ(a.count(), 3u);
     EXPECT_EQ(a.clamped_low(), 1u);

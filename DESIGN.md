@@ -453,3 +453,42 @@ bypassed the kernel's UDP stack.
 no longer fits a 1500-byte MTU, and the kernel fragments it. An XDP program sees
 the UDP header only in the first fragment. The feed server refuses a budget
 above 1440 bytes when the trailer is on.
+
+## 14. The box, scripted before it exists
+
+`tools/box/` is what runs on the Linux machine: `setup_check.sh`, `topology.sh`
+(sender port into its own network namespace, cabled to the receiver port),
+`gate0_nic.sh`, `knobs.sh` (every set is read back, and a set that does not stick
+fails), `ablation.sh` (one knob against stock, both receive modes, two rates) and
+`summarize.py`. The order is in `docs/box-runbook.md`. All of it was run on a
+veth pair in the container, where it found three bugs that would otherwise have
+cost days on the box:
+
+- **A warmup that broke decoding.** `--warmup-ms` skipped stripping the trailer
+  as well as recording it, so every warmup datagram reached the decoder 32
+  bytes too long and was rejected. The first ablation "measured" a receiver that
+  applied nothing. Stripping is now unconditional, and a test runs a warmup and
+  requires every message applied.
+- **`set -euo pipefail` against `grep`.** A `grep` that matched nothing ended
+  the ablation after its first run, silently, since the rest was simply never
+  attempted.
+- **A gate that can fail for the right reason.** On veth, Gate 0 passed the
+  driver, queue, forced native attach and copy bind, and no loss at 20k and 100k
+  pps, then failed step 5 because veth has no hardware timestamps, and printed
+  `GATE 0 FAIL`. That is the behaviour wanted on hardware that cannot do what the
+  project claims.
+
+`knobs.sh restore-stock` was checked by ablating `thp_never` and confirming THP
+was back to `always` afterwards.
+
+**The measurement sender does nothing between sends.** With the servers on, the
+send thread also fed the rewind and snapshot servers and polled their sockets.
+`--preload` builds every packet before the first send, and `--no-servers` removes
+the servers. In the container, sender lag at p50 went from 628 ns to 43 ns. The
+container's tails are hypervisor scheduling and are not evidence of anything.
+End of session now takes its sequence number from the last packet header sent on
+feed A, not from the rewind server, which may not be running.
+
+**Zero is a value.** The histogram used to clamp 0 to 1 and count it as clamped.
+A sender exactly on schedule at nanosecond resolution records 0, which is a
+measurement. Only negative values are clamped now.

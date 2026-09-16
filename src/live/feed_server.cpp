@@ -97,12 +97,57 @@ struct FeedServer::Impl {
         rewind_fd = net::udp_socket(r);
         listen_fd = net::tcp_listen(c.snapshot);
 
+        if (c.preload) {
+            preload_all();
+        }
         for (int f = 0; f < 2; ++f) {
             pull(f);
         }
     }
 
+    // With preload, both streams are packed into memory before the first send.
+    struct Preloaded {
+        struct Rec {
+            u64         due;
+            std::size_t off;
+            std::size_t len;
+            bool        data;
+        };
+        Bytes            arena;
+        std::vector<Rec> recs;
+        std::size_t      next = 0;
+    };
+    Preloaded pre[2];
+
+    void preload_all() {
+        for (int f = 0; f < 2; ++f) {
+            Preloaded&      p = pre[f];
+            replay::Emitted e;
+            while (streams[static_cast<std::size_t>(f)].next(e) == replay::StreamStatus::Ok) {
+                p.recs.push_back(
+                    {e.send_ns, p.arena.size(), e.bytes.size(), e.kind == mold::Kind::Messages});
+                p.arena.insert(p.arena.end(), e.bytes.begin(), e.bytes.end());
+            }
+            stats.preloaded_bytes += p.arena.size();
+        }
+    }
+
     void pull(int f) {
+        if (cfg.preload) {
+            Preloaded& p = pre[f];
+            if (p.next == p.recs.size()) {
+                have[f] = false;
+                done[f] = true;
+                return;
+            }
+            const auto& r = p.recs[p.next++];
+            have[f] = true;
+            due[f] = r.due;
+            next_is_data[f] = r.data;
+            next_bytes[f].assign(p.arena.begin() + static_cast<std::ptrdiff_t>(r.off),
+                                 p.arena.begin() + static_cast<std::ptrdiff_t>(r.off + r.len));
+            return;
+        }
         replay::Emitted e;
         if (streams[static_cast<std::size_t>(f)].next(e) != replay::StreamStatus::Ok) {
             have[f] = false;
@@ -113,6 +158,22 @@ struct FeedServer::Impl {
         due[f] = e.send_ns;
         next_is_data[f] = e.kind == mold::Kind::Messages;
         next_bytes[f].assign(e.bytes.begin(), e.bytes.end());
+    }
+
+    // One past the last message feed A has sent: what end of session announces.
+    // Read from the packet header rather than from the rewind server, which
+    // does not run in measurement mode.
+    u64 next_seq_a = 1;
+
+    void note_sent_a(const Bytes& pkt) {
+        if (pkt.size() >= mold::kHeaderSize) {
+            const u64       seq = itch::load_be<u64>(pkt.data() + mold::kSessionSize);
+            const itch::u16 count = itch::load_be<itch::u16>(pkt.data() + mold::kSessionSize + 8);
+            if (count != mold::kHeartbeatCount && count != mold::kEndOfSessionCount) {
+                next_seq_a = std::max(next_seq_a, seq + count);
+                stats.messages += count;
+            }
+        }
     }
 
     [[nodiscard]] bool faults_active() const noexcept {
@@ -130,7 +191,6 @@ struct FeedServer::Impl {
             rewind.publish(q, m);
             snap.publish(q, m);
             ++q;
-            ++stats.messages;
         }
     }
 
@@ -256,7 +316,10 @@ struct FeedServer::Impl {
                 }
                 stats.max_lag_ns = std::max(stats.max_lag_ns, t - due[f]);
                 if (f == 0 && next_is_data[0]) {
-                    publish(next_bytes[0]);  // the servers follow feed A
+                    note_sent_a(next_bytes[0]);
+                    if (cfg.servers) {
+                        publish(next_bytes[0]);  // the servers follow feed A
+                    }
                 }
                 transmit(f, next_bytes[f], t);
                 pull(f);
@@ -269,7 +332,7 @@ struct FeedServer::Impl {
             if (done[0] && done[1] && !eos_scheduled) {
                 eos_scheduled = true;
                 eos_due = t + cfg.eos_interval_ns;
-                eos_seq = rewind.next_sequence();
+                eos_seq = next_seq_a;
             }
             if (eos_scheduled && eos_left > 0 && t >= eos_due) {
                 mold::Packer p(cfg.session, eos_seq, mold::kMaxPayloadStandardMtu);
@@ -281,12 +344,16 @@ struct FeedServer::Impl {
                 eos_due = t + cfg.eos_interval_ns;
             }
             if (eos_scheduled && eos_left == 0 && held.empty()) {
-                stats.book_digest = itch::book::book_digest(snap.book().book());
+                if (cfg.servers) {
+                    stats.book_digest = itch::book::book_digest(snap.book().book());
+                }
                 break;
             }
 
-            serve_rewind();
-            serve_snapshots();
+            if (cfg.servers) {
+                serve_rewind();
+                serve_snapshots();
+            }
 
             // Wait for the next thing that is due, or for a request.
             u64 next = ~u64{0};
@@ -299,9 +366,14 @@ struct FeedServer::Impl {
             const u64 t2 = now2 > start ? now2 - start : 0;
             const u64 wait_ns = next > t2 ? next - t2 : 0;
             if (cfg.busy_wait && started) {
-                // Measurement pacing: never sleep, only check for requests.
-                pollfd fds[2] = {{rewind_fd.get(), POLLIN, 0}, {listen_fd.get(), POLLIN, 0}};
-                (void)::poll(fds, 2, 0);
+                // Measurement pacing: never sleep. With the servers off there
+                // is nothing else to look at between two sends.
+                if (cfg.servers) {
+                    pollfd fds[2] = {{rewind_fd.get(), POLLIN, 0}, {listen_fd.get(), POLLIN, 0}};
+                    (void)::poll(fds, 2, 0);
+                } else if (wait_ns > 0) {
+                    cpu_relax();
+                }
             } else if (wait_ns > 2'000'000 || !started) {
                 pollfd    fds[2] = {{rewind_fd.get(), POLLIN, 0}, {listen_fd.get(), POLLIN, 0}};
                 const int ms = static_cast<int>(std::min<u64>(wait_ns / 1'000'000 - 1, 20));

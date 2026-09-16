@@ -29,9 +29,11 @@ public:
     Histogram(const Histogram&) = delete;
     Histogram& operator=(const Histogram&) = delete;
 
-    // Values below 1 are recorded as 1 and above the highest trackable value as
-    // the highest; both are counted, because a clamped value is not a
-    // measurement and a report has to say how many there were.
+    // Zero is a real value (a sender exactly on schedule at nanosecond
+    // resolution) and is recorded as zero. Negative values are recorded as zero
+    // and values above the highest trackable one as the highest; both are
+    // counted, because a clamped value is not a measurement and a report has to
+    // say how many there were.
     void record(i64 ns) noexcept;
     void merge(const Histogram& other);
     void reset() noexcept;
