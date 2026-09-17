@@ -61,41 +61,74 @@ static void count(__u32 which) {
     }
 }
 
-SEC("xdp")
-int ttt_xdp_redirect(struct xdp_md* ctx) {
+enum verdict { PASS, REDIRECT, NO_SOCKET };
+
+static __always_inline enum verdict classify(struct xdp_md* ctx) {
     void* data = (void*)(long)ctx->data;
     void* end = (void*)(long)ctx->data_end;
 
     struct ethhdr* eth = data;
     if ((void*)(eth + 1) > end || eth->h_proto != bpf_htons(ETH_P_IP)) {
-        goto pass;
+        return PASS;
     }
     struct iphdr* ip = (void*)(eth + 1);
     if ((void*)(ip + 1) > end || ip->protocol != IPPROTO_UDP || ip->ihl < 5) {
-        goto pass;
+        return PASS;
     }
     struct udphdr* udp = (void*)ip + ip->ihl * 4;
     if ((void*)(udp + 1) > end) {
-        goto pass;
+        return PASS;
     }
 
     __u32          zero = 0;
     struct config* cfg = bpf_map_lookup_elem(&ttt_config, &zero);
     if (!cfg || udp->dest != cfg->dst_port || (cfg->dst_ip != 0 && ip->daddr != cfg->dst_ip)) {
-        goto pass;
+        return PASS;
     }
-
     __u32 queue = ctx->rx_queue_index;
-    if (!bpf_map_lookup_elem(&ttt_xsks, &queue)) {
-        count(COUNT_NO_SOCKET);
-        return XDP_PASS;
+    return bpf_map_lookup_elem(&ttt_xsks, &queue) ? REDIRECT : NO_SOCKET;
+}
+
+SEC("xdp")
+int ttt_xdp_redirect(struct xdp_md* ctx) {
+    switch (classify(ctx)) {
+        case REDIRECT: count(COUNT_REDIRECTED); return bpf_redirect_map(&ttt_xsks, ctx->rx_queue_index, XDP_PASS);
+        case NO_SOCKET: count(COUNT_NO_SOCKET); return XDP_PASS;
+        default: count(COUNT_PASSED); return XDP_PASS;
+    }
+}
+
+// The same, and it also puts the NIC's receive timestamp in front of every
+// redirected packet, as XDP metadata the AF_XDP socket delivers with the frame.
+// The timestamp comes from a kfunc the driver implements, so this program has to
+// be loaded bound to its device, and a device-bound program cannot run in
+// generic mode.
+extern int bpf_xdp_metadata_rx_timestamp(const struct xdp_md* ctx, __u64* timestamp) __ksym;
+
+struct rx_meta {
+    __u64 timestamp;  // the NIC's clock, nanoseconds; 0 if none
+    __s32 rc;         // what the kfunc returned: 0, or -EOPNOTSUPP / -ENODATA
+    __u32 magic;      // 0x54544d31, "TTM1"
+};
+
+SEC("xdp")
+int ttt_xdp_redirect_ts(struct xdp_md* ctx) {
+    switch (classify(ctx)) {
+        case REDIRECT: break;
+        case NO_SOCKET: count(COUNT_NO_SOCKET); return XDP_PASS;
+        default: count(COUNT_PASSED); return XDP_PASS;
+    }
+    if (bpf_xdp_adjust_meta(ctx, -(int)sizeof(struct rx_meta)) == 0) {
+        struct rx_meta* meta = (void*)(long)ctx->data_meta;
+        if ((void*)(meta + 1) <= (void*)(long)ctx->data) {
+            __u64 ts = 0;
+            meta->rc = bpf_xdp_metadata_rx_timestamp(ctx, &ts);
+            meta->timestamp = meta->rc == 0 ? ts : 0;
+            meta->magic = 0x54544d31;
+        }
     }
     count(COUNT_REDIRECTED);
-    return bpf_redirect_map(&ttt_xsks, queue, XDP_PASS);
-
-pass:
-    count(COUNT_PASSED);
-    return XDP_PASS;
+    return bpf_redirect_map(&ttt_xsks, ctx->rx_queue_index, XDP_PASS);
 }
 
 char LICENSE[] SEC("license") = "Dual MIT/GPL";

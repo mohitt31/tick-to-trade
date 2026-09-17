@@ -37,16 +37,38 @@ const char* to_string(BindMode m) noexcept { return m == BindMode::ZeroCopy ? "z
 
 // --- the program ------------------------------------------------------------
 
-Program::Program(const std::string& iface, AttachMode mode, const net::Endpoint& match)
-    : mode_(mode) {
+Program::Program(const std::string& iface, AttachMode mode, const net::Endpoint& match,
+                 bool rx_timestamps)
+    : mode_(mode), rx_timestamps_(rx_timestamps) {
     ifindex_ = static_cast<int>(::if_nametoindex(iface.c_str()));
     if (ifindex_ == 0) {
         fail_errno(errno, "if_nametoindex(" + iface + ")");
     }
-    skel_ = ttt_xdp__open_and_load();
-    if (skel_ == nullptr) {
-        fail_errno(errno, "loading the XDP program");
+    if (rx_timestamps && mode != AttachMode::Native) {
+        throw std::invalid_argument(
+            "receive timestamps need a device-bound program, which only runs in native mode");
     }
+    skel_ = ttt_xdp__open();
+    if (skel_ == nullptr) {
+        fail_errno(errno, "opening the XDP program");
+    }
+    // Load only the program in use. The timestamping one calls a device kfunc,
+    // which the verifier accepts only in a program bound to that device.
+    bpf_program* use =
+        rx_timestamps ? skel_->progs.ttt_xdp_redirect_ts : skel_->progs.ttt_xdp_redirect;
+    bpf_program* skip =
+        rx_timestamps ? skel_->progs.ttt_xdp_redirect : skel_->progs.ttt_xdp_redirect_ts;
+    (void)bpf_program__set_autoload(skip, false);
+    if (rx_timestamps) {
+        bpf_program__set_ifindex(use, static_cast<__u32>(ifindex_));
+        (void)bpf_program__set_flags(use, BPF_F_XDP_DEV_BOUND_ONLY);
+    }
+    if (const int rc = ttt_xdp__load(skel_); rc != 0) {
+        ttt_xdp__destroy(skel_);
+        fail_errno(-rc, rx_timestamps ? "loading the device-bound XDP program"
+                                      : "loading the XDP program");
+    }
+    prog_ = use;
 
     struct Config {
         u32 dst_ip;
@@ -64,7 +86,7 @@ Program::Program(const std::string& iface, AttachMode mode, const net::Endpoint&
     }
 
     // Forced mode, and never replacing a program someone else attached.
-    const int prog_fd = bpf_program__fd(skel_->progs.ttt_xdp_redirect);
+    const int prog_fd = bpf_program__fd(prog_);
     const int rc = bpf_xdp_attach(ifindex_, prog_fd,
                                   attach_flags(mode) | XDP_FLAGS_UPDATE_IF_NOEXIST, nullptr);
     if (rc != 0) {
@@ -268,7 +290,12 @@ int Socket::umem_numa_node() const {
 
 // --- the path ---------------------------------------------------------------
 
-XdpPath::XdpPath(Socket& sock, const net::Endpoint& match, u64 timeout_ns, bool busy_poll)
-    : sock_(sock), match_(match), timeout_ns_(timeout_ns), busy_poll_(busy_poll) {}
+XdpPath::XdpPath(Socket& sock, const net::Endpoint& match, u64 timeout_ns, bool busy_poll,
+                 bool rx_timestamps)
+    : sock_(sock),
+      match_(match),
+      timeout_ns_(timeout_ns),
+      busy_poll_(busy_poll),
+      rx_timestamps_(rx_timestamps) {}
 
 }  // namespace ttt::xdp

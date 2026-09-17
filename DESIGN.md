@@ -529,3 +529,19 @@ nothing at all, which is reported rather than dropped. Its self-test caught its
 own first bug: the event-name pattern kept a trailing colon, so no event would
 ever have matched its type. Sharing a window is not causation. The table picks
 what to chase, and a fix with a before-and-after run is the proof.
+
+**NIC receive timestamps on the AF_XDP path.** The BPF object now carries a
+second program, `ttt_xdp_redirect_ts`. It calls the driver's
+`bpf_xdp_metadata_rx_timestamp` kfunc and writes the stamp, the kfunc's return
+code and a magic number as 16 bytes of XDP metadata in front of each redirected
+packet. `XdpPath` reads the metadata from the frame's headroom and records
+`nic_to_user`, counting each frame as stamped, unstamped (the driver had no
+stamp) or metadata missing (it never reached the socket), so every frame is in
+exactly one bucket. A kfunc call is accepted by the verifier only in a program
+bound to its device, and a device-bound program cannot attach in generic mode,
+so asking for timestamps in generic mode is refused, not quietly turned into no
+timestamps. Only the program in use is loaded. On the container's veth pair
+(Linux 6.12), the device-bound program loads, metadata reaches the socket even
+in copy mode (0 missing), and the kfunc succeeds with a zero stamp because veth
+has no clock, so every frame counts as unstamped. The plumbing is proven, and the
+numbers have to come from the i226.

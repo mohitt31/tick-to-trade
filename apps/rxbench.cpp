@@ -4,7 +4,8 @@
 //   ttt_rxbench --path PATH [options]
 //
 //   --path recvfrom | recvmmsg:BATCH | epoll-lt | epoll-et | uring | uring-sqpoll | uring-defer
-//          | xdp:IFACE:QUEUE:native|generic:copy|zerocopy[:busy]
+//          | xdp:IFACE:QUEUE:native|generic:copy|zerocopy[:busy][:ts]
+//          (ts: NIC receive timestamps through XDP metadata; native only)
 //          | recvmsg-ts[:IFACE]   recvmsg with kernel receive timestamps; with IFACE,
 //          hardware stamps too, after asking IFACE to stamp every packet
 //          For xdp, --feed is the flow the XDP program redirects, and no UDP
@@ -292,15 +293,23 @@ int main(int argc, char** argv) try {
             if (p == std::string::npos) break;
             at = p + 1;
         }
-        if (parts.size() < 5 || parts.size() > 6 ||
-            (parts[3] != "native" && parts[3] != "generic") ||
-            (parts[4] != "copy" && parts[4] != "zerocopy") ||
-            (parts.size() == 6 && parts[5] != "busy")) {
-            usage("xdp path is xdp:IFACE:QUEUE:native|generic:copy|zerocopy[:busy]");
+        bool busy = false;
+        bool stamps = false;
+        for (std::size_t i = 5; i < parts.size(); ++i) {
+            if (parts[i] == "busy")
+                busy = true;
+            else if (parts[i] == "ts")
+                stamps = true;
+            else
+                usage("unknown xdp option " + parts[i]);
+        }
+        if (parts.size() < 5 || (parts[3] != "native" && parts[3] != "generic") ||
+            (parts[4] != "copy" && parts[4] != "zerocopy")) {
+            usage("xdp path is xdp:IFACE:QUEUE:native|generic:copy|zerocopy[:busy][:ts]");
         }
         xdp::Program prog(parts[1],
                           parts[3] == "native" ? xdp::AttachMode::Native : xdp::AttachMode::Generic,
-                          feed);
+                          feed, stamps);
         xdp::SocketConfig sc;
         sc.queue = static_cast<xdp::u32>(num(parts[2]));
         sc.bind = parts[4] == "zerocopy" ? xdp::BindMode::ZeroCopy : xdp::BindMode::Copy;
@@ -310,10 +319,16 @@ int main(int argc, char** argv) try {
         std::printf("xdp attached %s (requested %s), socket %s on queue %u, UMEM on NUMA node %d\n",
                     prog.attached_mode().c_str(), parts[3].c_str(),
                     sock.zerocopy() ? "zerocopy" : "copy", sc.queue, sock.umem_numa_node());
-        xdp::XdpPath path(sock, feed, timeout, parts.size() == 6);
+        xdp::XdpPath path(sock, feed, timeout, busy, stamps);
         const int    rc = report(path, bc, path_name, latency_out, manifest_iface);
-        const auto   c = prog.counters();
-        const auto   st = sock.statistics();
+        if (stamps) {
+            std::printf("nic_to_user       %s\n", path.nic_to_user().summary().c_str());
+            std::printf("frames unstamped %" PRIu64 " (last kfunc rc %d), metadata missing %" PRIu64
+                        "\n",
+                        path.unstamped(), path.last_kfunc_rc(), path.meta_missing());
+        }
+        const auto c = prog.counters();
+        const auto st = sock.statistics();
         std::printf("xdp program: redirected %" PRIu64 "  no socket on queue %" PRIu64
                     "  passed %" PRIu64 "\n",
                     c.redirected, c.no_socket, c.passed);

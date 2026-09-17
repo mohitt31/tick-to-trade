@@ -213,6 +213,57 @@ TEST_F(VethPair, CopyModeCarriesTheFeed) {
     }
 }
 
+// Receive timestamps through XDP metadata. The program has to load bound to the
+// device, generic mode has to be refused rather than silently lose the
+// timestamps, and every frame must land in exactly one bucket: stamped,
+// unstamped (the driver had no stamp to give), or metadata missing (it did not
+// reach the socket). veth implements the kfunc but has no hardware clock, so
+// what matters here is the accounting and that the feed still arrives whole.
+TEST_F(VethPair, RxTimestampMetadata) {
+    EXPECT_THROW(Program(kIfRx, AttachMode::Generic, kRxAddr, true), std::invalid_argument);
+
+    const Stream s = make_stream();
+    Program      prog(kIfRx, AttachMode::Native, kRxAddr, true);
+    EXPECT_TRUE(prog.rx_timestamps());
+    EXPECT_EQ(prog.attached_mode(), "native");
+
+    SocketConfig cfg;
+    cfg.bind = BindMode::Copy;
+    Socket  sock(prog, cfg);
+    XdpPath path(sock, kRxAddr, 10'000'000, false, true);
+
+    std::atomic<bool> stop{false};
+    std::string       tx_error;
+    std::thread       t([&] {
+        try {
+            (void)send_from_namespace(s, stop);
+        } catch (const std::exception& e) {
+            tx_error = e.what();
+        }
+    });
+    rx::BenchConfig   bc;
+    bc.line.session = mold::Session("XDPTEST");
+    bc.idle_timeout_ns = 3'000'000'000;
+    const rx::BenchResult r = rx::run_bench(path, bc, stop);
+    stop = true;
+    t.join();
+    ASSERT_TRUE(tx_error.empty()) << tx_error;
+
+    EXPECT_EQ(r.rx.stopped_because, "end of session, book complete");
+    EXPECT_EQ(r.rx.digest, s.digest);
+    EXPECT_EQ(path.nic_to_user().count() + path.unstamped() + path.meta_missing(),
+              r.path.datagrams);
+    // Linux 6.12 carries XDP metadata to the socket even in copy mode. A kernel
+    // that does not would fail here, and the AF_XDP timestamp column would not
+    // exist on it.
+    EXPECT_EQ(path.meta_missing(), 0u);
+    std::printf("stamped %llu  unstamped %llu (last kfunc rc %d)  metadata missing %llu  of %llu\n",
+                static_cast<unsigned long long>(path.nic_to_user().count()),
+                static_cast<unsigned long long>(path.unstamped()), path.last_kfunc_rc(),
+                static_cast<unsigned long long>(path.meta_missing()),
+                static_cast<unsigned long long>(r.path.datagrams));
+}
+
 // The trap the whole gate exists for: the feed arrives on a queue with no
 // socket. Nothing errors anywhere; only the program's counter says so.
 TEST_F(VethPair, PacketsForAQueueWithoutASocketAreCounted) {

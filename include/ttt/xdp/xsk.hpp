@@ -31,9 +31,11 @@
 #include <linux/if_xdp.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <time.h>
 
 #include <cerrno>
 #include <cstddef>
+#include <cstring>
 #include <span>
 #include <string>
 #include <vector>
@@ -42,11 +44,13 @@
 #include "itch/core/endian.hpp"
 #include "itch/core/types.hpp"
 #include "ttt/core/clock.hpp"
+#include "ttt/measure/histogram.hpp"
 #include "ttt/net/endpoint.hpp"
 #include "ttt/net/socket.hpp"
 #include "ttt/rx/socket_paths.hpp"
 
 struct ttt_xdp;  // generated libbpf skeleton
+struct bpf_program;
 
 namespace ttt::xdp {
 
@@ -69,7 +73,10 @@ struct ProgramCounters {
 // The XDP program, loaded and attached to one interface for its lifetime.
 class Program {
 public:
-    Program(const std::string& iface, AttachMode mode, const net::Endpoint& match);
+    // rx_timestamps loads the variant that puts the NIC's receive timestamp in
+    // front of each redirected frame; native mode only.
+    Program(const std::string& iface, AttachMode mode, const net::Endpoint& match,
+            bool rx_timestamps = false);
     ~Program();
     Program(const Program&) = delete;
     Program& operator=(const Program&) = delete;
@@ -81,11 +88,14 @@ public:
     // "multi" or "none".
     [[nodiscard]] std::string     attached_mode() const;
     [[nodiscard]] ProgramCounters counters() const;
+    [[nodiscard]] bool            rx_timestamps() const noexcept { return rx_timestamps_; }
 
 private:
-    ttt_xdp*   skel_ = nullptr;
-    int        ifindex_ = 0;
-    AttachMode mode_;
+    ttt_xdp*     skel_ = nullptr;
+    bpf_program* prog_ = nullptr;
+    int          ifindex_ = 0;
+    AttachMode   mode_;
+    bool         rx_timestamps_ = false;
 };
 
 struct SocketConfig {
@@ -141,6 +151,13 @@ public:
         return n;
     }
 
+    // Where a pointer into the UMEM sits inside its frame. In aligned mode a
+    // packet starts after the kernel's headroom, and XDP metadata sits just
+    // before the packet, inside that headroom.
+    [[nodiscard]] u64 frame_offset(const std::byte* p) const noexcept {
+        return static_cast<u64>(p - static_cast<const std::byte*>(umem_)) & (cfg_.frame_size - 1);
+    }
+
     // The fill ring asks to be kicked when the kernel ran out of frames to use.
     [[nodiscard]] bool fill_needs_wakeup() const noexcept {
         return cfg_.need_wakeup && (fill_.flags.load() & XDP_RING_NEED_WAKEUP) != 0;
@@ -187,17 +204,28 @@ class XdpPath {
 public:
     static constexpr u32 kBatch = 64;
 
-    XdpPath(Socket& sock, const net::Endpoint& match, u64 timeout_ns, bool busy_poll);
+    XdpPath(Socket& sock, const net::Endpoint& match, u64 timeout_ns, bool busy_poll,
+            bool rx_timestamps = false);
 
     template <class F>
     std::size_t receive(F&& on_datagram) {
         const u64 deadline = now_ns() + timeout_ns_;
         for (;;) {
             u64         t = 0;
+            u64         real = 0;
             std::size_t got = 0;
             const u32   n = sock_.take(kBatch, [&](std::span<const std::byte> frame) {
                 if (t == 0) {
                     t = now_ns();
+                    if (rx_timestamps_) {
+                        timespec r{};
+                        ::clock_gettime(CLOCK_REALTIME, &r);
+                        real = static_cast<u64>(r.tv_sec) * 1'000'000'000u +
+                               static_cast<u64>(r.tv_nsec);
+                    }
+                }
+                if (rx_timestamps_) {
+                    read_meta(frame, real);
                 }
                 ++stats_.datagrams;
                 ++got;
@@ -242,6 +270,13 @@ public:
 
     [[nodiscard]] const rx::PathStats& stats() const noexcept { return stats_; }
 
+    // With rx_timestamps: the NIC's receive stamp to the frame being taken, on
+    // CLOCK_REALTIME against the NIC's clock (phc2sys caveat as for sockets).
+    [[nodiscard]] const measure::Histogram& nic_to_user() const noexcept { return nic_to_user_; }
+    [[nodiscard]] u64                       meta_missing() const noexcept { return meta_missing_; }
+    [[nodiscard]] u64                       unstamped() const noexcept { return unstamped_; }
+    [[nodiscard]] itch::i32                 last_kfunc_rc() const noexcept { return last_rc_; }
+
 private:
     // The UDP payload of an Ethernet/IPv4/UDP frame to the matched endpoint, or
     // empty.
@@ -265,11 +300,43 @@ private:
         return f.subspan(udp + 8, len - 8);
     }
 
-    Socket&       sock_;
-    net::Endpoint match_;
-    u64           timeout_ns_;
-    bool          busy_poll_;
-    rx::PathStats stats_{};
+    // The metadata the timestamping program puts in front of a frame.
+    struct RxMeta {
+        u64       timestamp;
+        itch::i32 rc;
+        u32       magic;
+    };
+    static constexpr u32 kMetaMagic = 0x54544d31;
+
+    void read_meta(std::span<const std::byte> frame, u64 real_ns) noexcept {
+        if (sock_.frame_offset(frame.data()) < sizeof(RxMeta)) {
+            ++meta_missing_;
+            return;
+        }
+        RxMeta m{};
+        std::memcpy(&m, frame.data() - sizeof(RxMeta), sizeof(RxMeta));
+        if (m.magic != kMetaMagic) {
+            ++meta_missing_;  // metadata did not survive to the socket
+        } else if (m.rc != 0 || m.timestamp == 0) {
+            ++unstamped_;
+            last_rc_ = m.rc;
+        } else {
+            nic_to_user_.record(real_ns >= m.timestamp
+                                    ? static_cast<itch::i64>(real_ns - m.timestamp)
+                                    : -static_cast<itch::i64>(m.timestamp - real_ns));
+        }
+    }
+
+    Socket&            sock_;
+    net::Endpoint      match_;
+    u64                timeout_ns_;
+    bool               busy_poll_;
+    bool               rx_timestamps_ = false;
+    measure::Histogram nic_to_user_;
+    u64                meta_missing_ = 0;
+    u64                unstamped_ = 0;
+    itch::i32          last_rc_ = 0;
+    rx::PathStats      stats_{};
 };
 
 }  // namespace ttt::xdp
