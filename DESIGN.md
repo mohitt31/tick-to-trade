@@ -545,3 +545,32 @@ timestamps. Only the program in use is loaded. On the container's veth pair
 in copy mode (0 missing), and the kfunc succeeds with a zero stamp because veth
 has no clock, so every frame counts as unstamped. The plumbing is proven, and the
 numbers have to come from the i226.
+
+## 16. Counting copies, not asserting them
+
+`tools/box/paths.sh` runs every receive path under the same conditions and wraps
+each receiver in `perf stat`, so the five-way table can say "one fewer copy"
+because it was counted. Picking what to count took three tries in the container,
+and each wrong answer looked plausible:
+
+- `skb_copy_datagram_iter` fired 5 times for 2,350 datagrams. On Linux 6.12 UDP
+  copies a linear skb through `copy_linear_skb`, which goes straight to
+  `copy_to_iter`, and `_copy_to_iter` cannot be probed.
+- A kprobe left in the kernel by an earlier run made adding it again fail, which
+  the first script read as "this kernel has no such function". The summarizer
+  then printed the missing counter as 0.000 copies per datagram, which is worse
+  than printing nothing. Stale probes are removed first now, and a counter that
+  was not collected prints as n/a.
+- `skb_consume_udp` runs once for each datagram that leaves a UDP socket after its
+  single copy to user memory. It counted exactly 3,514 for 3,514 datagrams on
+  recvfrom, recvmmsg, epoll and io_uring.
+
+AF_XDP does its work in softirq context, not in the receiver's process, so its
+probes are counted system-wide over each run. `__xsk_rcv` is the copy into the
+UMEM in copy mode: 3,514 for 3,514. `__xsk_rcv_zc` also counted 3,514 in copy
+mode. Despite its name, it is the enqueue onto the RX ring in both modes. So
+zero-copy on the real NIC has to show up as `__xsk_rcv` at zero, and a script
+that looked for `__xsk_rcv_zc` being non-zero would have called copy mode
+zero-copy. On veth in the container the table reads: every socket path 1.000
+copies per datagram (epoll-et at 3.1 system calls per datagram, the others
+about 1.1), AF_XDP copy mode 1.000 copies and 1.000 rx ring enqueues.

@@ -51,24 +51,26 @@ If step 3 or 4 fails, stop: the AF_XDP half of the project is re-planned before
 anything is measured. If only step 5 fails, external timing needs a second
 machine.
 
-## 4. Receive paths, one at a time
-
-The receiver is pinned to an isolated core and the sender to another, and the
-sender runs in measurement mode:
+## 4. Receive paths, all of them, with counters
 
 ```sh
-sudo taskset -c 7 build/linux-release/apps/ttt_rxbench --path recvmmsg:32 \
-    --feed 10.77.0.1:30001 --manifest-iface enp2s0 --warmup-ms 10000 --latency-out measurements/paths/recvmmsg32 &
-sudo ip netns exec ttt_tx taskset -c 3 build/linux-release/apps/ttt_feedd --input $ITCH_FILE \
-    --iface 10.77.0.2 --feed-a 10.77.0.1:30001 --feed-b 10.77.0.1:30002 \
-    --rate 100000 --budget-a 300 --budget-b 300 --trailer --busy-wait --preload --no-servers
+export ITCH_FILE=/path/to/01302019.NASDAQ_ITCH50.gz
+sudo -E tools/box/paths.sh 5
+tools/box/summarize.py measurements/paths --baseline recvfrom > docs/receive-paths.md
 ```
 
-A run whose receiver reports `missing` other than 0 is not a result. The `.hgrm`
-files carry the machine manifest; `tools/box/summarize.py` reads them.
+Every path runs under the same conditions: receiver pinned to `RX_CPU`, sender
+pinned in its namespace in measurement mode (`--trailer --busy-wait --preload
+--no-servers`), warmup excluded. The second table in the summary is the
+explanation: system calls, copies and context switches per datagram. Socket
+paths should show one copy per datagram, AF_XDP copy mode one copy into the
+UMEM, and AF_XDP zero-copy none. If zero-copy shows copies, it is not zero-copy,
+whatever the bind said. A run whose receiver reports `missing` other than 0 is
+left out.
 
 Keep the packet rate within the link. At 2.5 Gb/s a 1440-byte payload fits about
-200k packets a second, so high-rate runs use small budgets.
+200k packets a second, so high-rate runs use small budgets (`BUDGET`, 300 by
+default).
 
 ## 5. Tuning ablation
 

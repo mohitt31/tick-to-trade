@@ -12,3 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
+
+# Tools the box scripts need, in their own layer so the one above stays cached.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 linux-perf \
+    && rm -rf /var/lib/apt/lists/*
