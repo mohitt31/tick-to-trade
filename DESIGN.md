@@ -574,3 +574,12 @@ that looked for `__xsk_rcv_zc` being non-zero would have called copy mode
 zero-copy. On veth in the container the table reads: every socket path 1.000
 copies per datagram (epoll-et at 3.1 system calls per datagram, the others
 about 1.1), AF_XDP copy mode 1.000 copies and 1.000 rx ring enqueues.
+
+**Chaos on the wire.** `tools/box/chaos_wire.sh MINUTES` is the plan's hour-long
+run: `ttt_feedd` in the sender namespace with faults drawn from each iteration's
+seed (loss, duplication, jitter that reorders, joint outages as sequence ranges,
+lost retransmission replies, snapshots cut halfway), `ttt_recv` in the root
+namespace, and a pass only if the receiver ends complete with the sender's book
+digest. One minute on the container's veth pair ran 37 iterations of 100,000
+messages each, all passing, with up to 95 retransmission requests and 18
+snapshots in a single iteration.

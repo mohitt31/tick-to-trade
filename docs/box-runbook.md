@@ -88,7 +88,18 @@ parameter on the kernel command line and a reboot. `ablation.sh` refuses to run
 them unless `/proc/cmdline` really has it. Remove the parameter again before the
 next knob, because each knob is measured alone.
 
-## 6. Where the time goes, from the kernel's side
+## 6. Chaos on the wire
+
+```sh
+sudo tools/box/chaos_wire.sh 60
+```
+
+An hour of A/B feeds, retransmissions and snapshots over the cable, each
+iteration with faults from its own seed. It passes only if every iteration ends
+with the receiver's book digest equal to the sender's. A failing seed keeps both
+outputs and can be rerun alone.
+
+## 7. Where the time goes, from the kernel's side
 
 ```sh
 sudo taskset -c 7 build/linux-release/apps/ttt_rxbench --path recvmsg-ts:enp2s0 \
@@ -99,7 +110,7 @@ sudo taskset -c 7 build/linux-release/apps/ttt_rxbench --path recvmsg-ts:enp2s0 
 CLOCK_REALTIME -O 0 -m` running, and its offset log kept next to the result as
 the error bar.
 
-## 7. Jitter hunt
+## 8. Jitter hunt
 
 ```sh
 sudo tools/box/jitter_record.sh measurements/jitter/before -- --path recvmmsg:32 \
