@@ -1,20 +1,30 @@
 # tick-to-trade
 
-The receive side of a market data path: NASDAQ ITCH 5.0 carried over MoldUDP64
-multicast, received through five different Linux receive paths up to AF_XDP
-zero-copy, with A/B feed arbitration, gap recovery and snapshot
-resynchronisation feeding the order book from
+The receive side of a market data path. NASDAQ ITCH 5.0 is replayed as MoldUDP64
+over UDP, on two feeds, and received through a choice of Linux receive paths:
+`recvfrom`, `recvmmsg`, `epoll`, `io_uring` and AF_XDP in copy and zero-copy
+mode. Arbitration between the feeds, gap recovery by retransmission and snapshot
+resynchronisation feed the order book from
 [itch-exchange](https://github.com/mohitt31/itch-exchange).
 
-What exists so far runs without a network: the MoldUDP64 codec, a replayer that
-turns an ITCH file into paced packets (written to pcap and checked with an
-audit), A/B arbitration with retransmission and snapshot recovery, and a chaos
-harness that checks the book against an oracle after every message under
-generated loss, duplication, reordering and outages. The Linux receive paths
-come next.
+## What is checked, and how
 
-Work in progress. No performance numbers are published yet. When they are, each
-one will be in [NUMBERS.md](NUMBERS.md) with the machine it ran on and the
+- **The book is never wrong.** A deterministic chaos harness runs sender, both
+  feeds, the rewind and snapshot servers and the receiver in simulated time, with
+  every fault drawn from one seed, and compares the receiver's book with an
+  oracle after every applied message. 100,000 seeds pass, and each of six planted
+  bugs is caught within the first ten seeds.
+- **The same code over real sockets.** `ttt_feedd` and `ttt_recv` run the
+  pipeline over UDP and TCP with faults injected at the sender, and the
+  receiver's final book digest has to equal the sender's.
+- **Loss is counted by sequence number**, with the kernel's and the NIC's counters
+  only as second witnesses.
+- **AF_XDP modes are forced and read back from the kernel**, never left to fall
+  back. `ttt_xdp_probe` checks a NIC before anything is measured on it.
+- **Copies and system calls per packet are counted with perf**, not asserted.
+
+Performance numbers come only from bare metal and are not published yet. When
+they are, each will be in [NUMBERS.md](NUMBERS.md) with its machine and the
 command that reproduces it.
 
 ## Build
@@ -24,13 +34,14 @@ git submodule update --init
 cmake --preset release && cmake --build --preset release && ctest --preset release
 ```
 
-Presets: `release`, `asan-ubsan`, `tsan`, `mutants`. The `mutants` preset also
-checks that the chaos harness catches each of six planted bugs.
+Presets: `release`, `asan-ubsan`, `tsan`, `mutants`. The Linux receive paths and
+AF_XDP need liburing, libbpf, clang and bpftool, and build only on Linux. On a Mac
+they can be built and tested in `tools/docker_dev.sh`.
 
 ```sh
-build/release/apps/ttt_replay --input 01302019.NASDAQ_ITCH50.gz --pcap out.pcap --rate 100000 --max-messages 2000000
-build/release/apps/ttt_pcap_audit out.pcap
-build/release/apps/ttt_chaos --seeds 100000
+bench/reproduce.sh correctness /path/to/01302019.NASDAQ_ITCH50.gz
 ```
 
-Design notes are in [DESIGN.md](DESIGN.md).
+Running it on the measurement machine is described in
+[docs/box-runbook.md](docs/box-runbook.md), and the reasoning behind the design
+in [DESIGN.md](DESIGN.md).
