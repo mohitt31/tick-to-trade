@@ -5,28 +5,61 @@ on:
     branches: [main]
   pull_request:
 
+# itch-exchange is a private submodule: the checkout needs a token with read
+# access to it, stored as the ITCH_EXCHANGE_TOKEN secret.
+
 jobs:
-  test:
+  macos:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, ubuntu-24.04]
         preset: [release, asan-ubsan, tsan, mutants]
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Install tools (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
-      - name: Install tools (macOS)
-        if: runner.os == 'macOS'
-        run: brew install ninja
-      # Recent Ubuntu kernels use more mmap randomness than TSan supports.
-      - name: TSan mmap workaround
-        if: runner.os == 'Linux' && matrix.preset == 'tsan'
-        run: sudo sysctl vm.mmap_rnd_bits=28
+          token: ${{ secrets.ITCH_EXCHANGE_TOKEN }}
+      - run: brew install ninja
       - run: cmake --preset ${{ matrix.preset }}
       - run: cmake --build --preset ${{ matrix.preset }}
       - run: ctest --preset ${{ matrix.preset }}
+
+  # Linux builds the receive paths and AF_XDP too, in the same Debian image as
+  # tools/docker_dev.sh. io_uring needs the default seccomp profile lifted; the
+  # AF_XDP tests create a veth pair and namespace, and skip where they cannot.
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [release, asan-ubsan, tsan]
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:trixie
+      options: --privileged --security-opt seccomp=unconfined
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential clang llvm lld cmake ninja-build \
+            git pkg-config ca-certificates zlib1g-dev liburing-dev libbpf-dev libxdp-dev bpftool \
+            iproute2 ethtool
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.ITCH_EXCHANGE_TOKEN }}
+      - run: git config --global --add safe.directory '*'
+      # Recent kernels use more mmap randomness than TSan supports.
+      - name: TSan mmap workaround
+        if: matrix.preset == 'tsan'
+        run: sysctl -w vm.mmap_rnd_bits=28
+      - run: cmake --preset ${{ matrix.preset }} -DCMAKE_CXX_COMPILER=g++
+      - run: cmake --build --preset ${{ matrix.preset }}
+      - run: ctest --preset ${{ matrix.preset }}
+
+  scripts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: for f in tools/box/*.sh tools/*.sh bench/*.sh; do bash -n "$f"; done
+      - run: python3 tools/box/jitter_correlate.py --selftest

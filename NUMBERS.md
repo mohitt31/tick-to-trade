@@ -19,6 +19,11 @@ messages 153000485  per-message checks 112290120  digest checks 76408919
 gaps 754181  retransmit requests 460373  snapshots applied 80326  evictions 20341700  duplicates dropped 68357344
 ```
 
+Rerun at commit 8709dda, six commits and a socket layer, AF_XDP and the Linux
+paths later, the output is identical line for line, down to every count. The
+simulation is a pure function of its seeds, and nothing since has changed what
+the handler does.
+
 **Six planted bugs, each caught.** Same machine, `mutants` preset:
 `ctest --preset mutants -R mutant`. First failing seed per bug is in DESIGN.md
 section 9.
